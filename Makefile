@@ -14,6 +14,10 @@ help: ## List the targets
 check-patch: ## Check that patches/9000 adds src/libavformat/ffstreamer.c as it stands
 	python3 tools/check_patch.py
 
+.PHONY: patch
+patch: ## Rewrite patches/9000's ffstreamer.c from src/libavformat/ffstreamer.c, where it is edited
+	python3 tools/sync_patch.py
+
 .PHONY: checkout
 checkout: ## Check out jellyfin-ffmpeg at JELLYFIN_TAG into build/, with patches/ after its series
 	./checkout.sh

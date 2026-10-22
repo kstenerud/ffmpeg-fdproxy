@@ -49,6 +49,7 @@ make media                # the suite's two films, made from FFmpeg's test sourc
 make test                 # the suite, against dist/bin-amd64, with the films in media/
 make fuzz                 # FFmpeg's side fuzzed for 10 minutes under ASan and UBSan
 make check-patch          # patches/9000 carries src/libavformat/ffstreamer.c as it stands
+make patch                # rewrites patches/9000 from src/ after an edit there
 ```
 
 `checkout.sh` checks out jellyfin-ffmpeg at the tag in `JELLYFIN_TAG`, adds `patches/` after
@@ -63,7 +64,9 @@ takes any films with those four streams in that order (`MEDIA=<dir>`).
 `make fuzz` builds `fuzz/ffstreamer_fuzzer.c`, a libFuzzer harness that feeds the protocol arbitrary
 bytes as the parent's frames, with AddressSanitizer and UndefinedBehaviorSanitizer, against a minimal
 FFmpeg built the same way, and runs it on eight workers from the seeds in `fuzz/corpus/`
-(`fuzz/make_corpus.py` writes them). Ten minutes, 17 million inputs, found nothing.
+(`fuzz/make_corpus.py` writes them), then makes seeks at the edges of the arithmetic. Ten minutes,
+17 million inputs, found nothing; a four-hour run then found that a file size near the top of int64
+overflowed rounding up to whole blocks, fixed and kept as a seed.
 
 ## Layout
 
@@ -75,7 +78,7 @@ FFmpeg built the same way, and runs it on eight workers from the seeds in `fuzz/
 | `src/` | The protocol's source, from which `patches/9000` is made. |
 | `checkout.sh`, `build.sh`, `Makefile`, `JELLYFIN_TAG` | Building the patched FFmpeg (above). |
 | `fuzz/` | The fuzz harness of FFmpeg's side, its build and its seeds. |
-| `tools/` | `check_patch.py`, and scripts for the development tree (`build_dev.sh`, and the edits it applies). |
+| `tools/` | `check_patch.py` and `sync_patch.py`, and scripts for the development tree (`build_dev.sh`, and the edits it applies). |
 | `.github/workflows/` | CI and releases (below). |
 | `bench/` | The measurements behind the protocol's choices, and the scripts that make them. |
 | `audits/` | The audits of each draft. |

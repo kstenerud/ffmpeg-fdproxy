@@ -658,7 +658,8 @@ static int ffstreamer_read(URLContext *h, unsigned char *buf, int size)
     }
 
     index = c->position / c->block;
-    blocks_in_file = (c->size + c->block - 1) / c->block;
+    /* Rounded up without adding: a size near INT64_MAX must not overflow. */
+    blocks_in_file = c->size / c->block + (c->size % c->block != 0);
 
     if ((slot = find_block(c, index)) < 0) {
         while (c->outstanding_count >= c->outstanding_allowed)
@@ -697,14 +698,22 @@ end:
 static int64_t ffstreamer_seek(URLContext *h, int64_t position, int whence)
 {
     FFStreamerContext *c = h->priv_data;
-    int64_t target;
+    int64_t target, base;
 
     switch (whence) {
     case AVSEEK_SIZE: target = c->size; goto end;
     case SEEK_SET:    target = position; break;
-    case SEEK_CUR:    target = c->position + position; break;
-    case SEEK_END:    target = c->size + position; break;
+    case SEEK_CUR:    base = c->position; break;
+    case SEEK_END:    base = c->size; break;
     default:          target = AVERROR(EINVAL); goto end;
+    }
+    if (whence != SEEK_SET) {
+        /* base is never negative, so only a sum past INT64_MAX can overflow. */
+        if (position > INT64_MAX - base) {
+            target = AVERROR(EINVAL);
+            goto end;
+        }
+        target = base + position;
     }
     if (target < 0) {
         target = AVERROR(EINVAL);

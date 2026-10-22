@@ -96,6 +96,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             ;
         if (ffstreamer_seek(h, ffstreamer_seek(h, 0, AVSEEK_SIZE) / 2, SEEK_SET) >= 0)
             ffstreamer_read(h, buffer, sizeof(buffer));
+        /* Seeks at the edges of the arithmetic, against whatever size the parent gave: a crafted
+         * film can make a demuxer ask any of these. */
+        ffstreamer_seek(h, INT64_MAX, SEEK_CUR);
+        ffstreamer_seek(h, INT64_MIN, SEEK_CUR);
+        ffstreamer_seek(h, INT64_MAX, SEEK_END);
+        if (ffstreamer_seek(h, -1, SEEK_END) >= 0)
+            ffstreamer_read(h, buffer, sizeof(buffer));
         ffstreamer_close_all(h);
     }
     av_free(c);

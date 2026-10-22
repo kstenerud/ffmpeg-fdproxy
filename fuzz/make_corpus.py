@@ -33,6 +33,9 @@ seeds = {
     "short-data": opening() + frame(DATA, 2, film[:100]),
     "wrong-number": opening() + data(9, 0),
     "empty-film": opening(size=0),
+    # A size at the top of int64, against which rounding up to whole blocks must not overflow; the
+    # long fuzz found that it did (2026-10-22).
+    "size-near-int64-max": opening(size=2**63 - 1) + data(2, 0),
 }
 os.makedirs(os.path.join(here, "corpus"), exist_ok=True)
 for name, seed in seeds.items():
