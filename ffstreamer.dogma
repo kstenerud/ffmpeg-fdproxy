@@ -35,16 +35,16 @@ reads (FFmpeg's -ffstreamer_read_fd).
 # FFmpeg numbers every frame it sends: HELLO is 0, and each later frame takes the next number,
 # wrapping from 127 to 0. A pipe may end after any whole frame: FFmpeg writes each frame with one
 # write() of at most 4,096 bytes, so a kill never leaves half of one (§5).
-ffmpeg_to_parent         = hello
-                         & (capability(1) & reads_then_done(2)?)?
-                         & eod
-                         ;
+ffmpeg_to_parent          = hello
+                          & (capability(1) & reads_then_done(2)?)?
+                          & eod
+                          ;
 
 # READs until DONE, or until FFmpeg exits without one (§7.5: a kill, a crash, an exit() mid-run).
 reads_then_done(sequence) = read(sequence) & reads_then_done(next(sequence))?
                           | done(sequence)
                           ;
-next(sequence)           = (sequence + 1) % 128;
+next(sequence)            = (sequence + 1) % 128;
 
 
 ###############################################################################
@@ -55,22 +55,26 @@ next(sequence)           = (sequence + 1) % 128;
 # REQUEST answers CAPABILITY (1). The DATA frames answer FFmpeg's READs in their order, so they
 # carry the numbers from 2 on. The parent answers no READ after DONE, and none once it has decided
 # to kill FFmpeg, so the DATA frames may stop short of the READs.
-parent_to_ffmpeg         = hello
-                         & (request(1) & answers(2)?)?
-                         & eod
-                         ;
-answers(sequence)        = data(sequence) & answers(next(sequence))?;
+parent_to_ffmpeg          = hello
+                          & (request(1) & answers(2)?)?
+                          & eod
+                          ;
+answers(sequence)         = data(sequence) & answers(next(sequence))?;
 
 
 ###############################################################################
-# Frames (§5)
+# The frame (§5): a 6-byte header, then the body
 ###############################################################################
 
-frame(type, sequence, lengths, body) = i8(type)
-                                     & i8(sequence)
-                                     & i32(var(length, lengths))
-                                     & sized(length * 8, body)
-                                     ;
+frame(type, sequence, body_lengths, body) = frame_type(type)
+                                          & frame_sequence(sequence)
+                                          & frame_body_length(var(body_length, body_lengths))
+                                          & sized(body_length * 8, body)
+                                          ;
+
+frame_type(type)              = i8(type);         # which message: never 0
+frame_sequence(sequence)      = i8(sequence);     # 0 to 127 (§6)
+frame_body_length(length)     = i32(length);      # the body's length in bytes
 
 type_hello      = 1;
 type_capability = 2;
@@ -81,55 +85,108 @@ type_done       = 6;
 
 
 ###############################################################################
-# Messages (§7)
+# HELLO (§7.1), from both sides
 ###############################################################################
 
-# HELLO, from both sides, is frozen in every version, its header included: type 1, sequence 0,
-# length 4, then the range of versions the sender speaks. The parent's echoes FFmpeg's 0.
-hello                    = i8(type_hello)
-                         & i8(0)
-                         & i32(4)
-                         & i16(var(lowest, 1~))
-                         & i16(lowest~)
-                         ;
+# Frozen in every version, its header included. The parent's echoes FFmpeg's sequence, 0.
+hello                        = frame(type_hello, 0, hello_body_length, hello_body);
+hello_body_length            = 4;
+hello_body                   = lowest_version_spoken(var(lowest, 1~))
+                             & highest_version_spoken(lowest~)
+                             ;
+lowest_version_spoken(v)     = i16(v);
+highest_version_spoken(v)    = i16(v);
 
-capability(sequence)     = frame(type_capability, sequence, 9,
-                             i32(var(preferred_block, 1~))    # preferred block size
-                           & i32(preferred_block~)            # largest DATA body it accepts
-                           & i8(1~16)                         # most READs it can have outstanding
-                           );
 
-request(sequence)        = frame(type_request, sequence, 27,
-                             i16(negotiated_version)          # a cross-check of the version
-                           & i64(1~)                          # run: the parent's identifier for it
-                           & i64(0~)                          # file size
-                           & i32(var(block, 1~capability_largest_body))
-                           & i32(block~capability_largest_body) # longest READ
-                           & i8(1~capability_outstanding)     # READs outstanding
-                           );
+###############################################################################
+# CAPABILITY (§7.2), from FFmpeg
+###############################################################################
 
-read(sequence)           = frame(type_read, sequence, 12,
-                             i64(var(offset, 0~terms_file_size))
-                           & i32((1~terms_longest_read) ! ((terms_file_size - offset + 1)~))
-                           );
+capability(sequence)         = frame(type_capability, sequence, capability_body_length, capability_body);
+capability_body_length       = 9;
+capability_body              = preferred_block_size(var(preferred, 1~))
+                             & largest_data_body_accepted(preferred~)
+                             & most_reads_outstanding(1~16)
+                             ;
+preferred_block_size(v)       = i32(v);
+largest_data_body_accepted(v) = i32(v);
+most_reads_outstanding(v)     = i8(v);
 
-data(sequence)           = frame(type_data, sequence, read_length(sequence), byte*);
 
-done(sequence)           = frame(type_done, sequence, 9~1040,
-                             i64(terms_run | 0)               # 0 when REQUEST's run broke its rule
-                           & (done_ok | done_err)
-                           );
-done_ok                  = i8(0);
-done_err                 = i8(1)
-                         & i8(done_terms | done_channel | done_protocol | done_interrupted)
-                         & i32(0~)                            # FFmpeg's error code, negated
-                         & i16(var(message_length, 0~1024))
-                         & byte{message_length}               # for the logs; any bytes
-                         ;
-done_terms       = 1; # FFmpeg's side declined REQUEST's terms, or could not take them up
-done_channel     = 2; # the channel to the parent ended: the parent died
-done_protocol    = 3; # the parent broke the protocol: a wrong type, number or length
-done_interrupted = 4; # FFmpeg's interrupt callback fired while the channel waited
+###############################################################################
+# REQUEST (§7.3), from the parent: the terms
+###############################################################################
+
+request(sequence)            = frame(type_request, sequence, request_body_length, request_body);
+request_body_length          = 27;
+request_body                 = version(negotiated_version)
+                             & run(1~)
+                             & file_size(0~)
+                             & block_size(var(block, 1~capability_largest_body))
+                             & longest_read(block~capability_largest_body)
+                             & reads_outstanding(1~capability_outstanding)
+                             ;
+version(v)                   = i16(v);   # the version both sides worked out; a cross-check
+run(v)                       = i64(v);   # the parent's identifier for the run, echoed in DONE
+file_size(v)                 = i64(v);   # the input's size in bytes
+block_size(v)                = i32(v);   # the size of the blocks FFmpeg's side asks for
+longest_read(v)              = i32(v);   # the most bytes one READ may ask for
+reads_outstanding(v)         = i8(v);    # the most READs FFmpeg's side may have unanswered
+
+
+###############################################################################
+# READ (§7.4), from FFmpeg
+###############################################################################
+
+read(sequence)               = frame(type_read, sequence, read_body_length, read_body);
+read_body_length             = 12;
+read_body                    = read_offset(var(offset, 0~terms_file_size))
+                             & read_length((1~terms_longest_read) ! ((terms_file_size - offset + 1)~))
+                             ;
+read_offset(v)               = i64(v);   # where in the input to read from
+read_length(v)               = i32(v);   # how many bytes; never past the end of the input
+
+
+###############################################################################
+# DATA (§7.4), from the parent
+###############################################################################
+
+data(sequence)               = frame(type_data, sequence, length_read(sequence), data_body);
+data_body                    = input_byte*;   # exactly the bytes the READ asked for
+input_byte                   = uint(8, ~);
+
+
+###############################################################################
+# DONE (§7.5), from FFmpeg: its account of the channel
+###############################################################################
+
+done(sequence)               = frame(type_done, sequence, done_body_lengths, done_body);
+done_body_lengths            = 9~1040;
+done_body                    = done_run(terms_run | 0)   # 0 when REQUEST's run broke its rule
+                             & (done_ok | done_err)
+                             ;
+done_run(v)                  = i64(v);
+
+done_ok                      = result(result_ok);
+done_err                     = result(result_err)
+                             & error_kind(kind_terms | kind_channel | kind_protocol | kind_interrupted)
+                             & error_code(0~)
+                             & message_length(var(length, 0~1024))
+                             & message(length)
+                             ;
+result(v)                    = i8(v);
+error_kind(v)                = i8(v);
+error_code(v)                = i32(v);   # FFmpeg's error code, negated; 0 when it had none to give
+message_length(v)            = i16(v);
+message(length)              = message_byte{length};   # for the logs; any bytes, sanitised (§9.11)
+message_byte                 = uint(8, ~);
+
+result_ok        = 0;
+result_err       = 1;
+kind_terms       = 1; # FFmpeg's side declined REQUEST's terms, or could not take them up
+kind_channel     = 2; # the channel to the parent ended: the parent died
+kind_protocol    = 3; # the parent broke the protocol: a wrong type, number or length
+kind_interrupted = 4; # FFmpeg's interrupt callback fired while the channel waited
 
 
 ###############################################################################
@@ -161,9 +218,8 @@ terms_longest_read: uinteger = """
 The longest READ REQUEST allowed.
 """;
 
-read_length(sequence: uinteger): uinteger = """
-The length of the READ numbered `sequence` that this DATA answers: the oldest READ outstanding. A
-DATA body is exactly the bytes that READ asked for.
+length_read(sequence: uinteger): uinteger = """
+The length of the READ numbered `sequence` that this DATA answers: the oldest READ outstanding.
 """;
 
 
@@ -171,7 +227,6 @@ DATA body is exactly the bytes that READ asked for.
 # Integers: signed, two's complement, little-endian (§5)
 ###############################################################################
 
-byte    = uint(8, ~);
 i8(v)   = sint(8, v);
 i16(v)  = ordered(sint(16, v));
 i32(v)  = ordered(sint(32, v));
