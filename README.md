@@ -47,11 +47,17 @@ Also checked:
 ```
 make build-amd64          # or build-arm64; the tarball and its binaries land in dist/
 make test MEDIA=<dir>     # the suite, against dist/bin-amd64, with film.mkv and film-moov-at-end.mp4
+make fuzz                 # FFmpeg's side fuzzed for 10 minutes under ASan and UBSan
 ```
 
 `build.sh` checks out jellyfin-ffmpeg at the tag in `JELLYFIN_TAG`, adds `patches/` after
 jellyfin's own `debian/patches/series`, and runs jellyfin's portable builder, which needs Docker. The
 first build makes its toolchain image, an hour or more; later builds take minutes.
+
+`make fuzz` builds `fuzz/ffstreamer_fuzzer.c`, a libFuzzer harness that feeds the protocol arbitrary
+bytes as the parent's frames, with AddressSanitizer and UndefinedBehaviorSanitizer, against a minimal
+FFmpeg built the same way, and runs it on eight workers from the seeds in `fuzz/corpus/`
+(`fuzz/make_corpus.py` writes them). Ten minutes, 17 million inputs, found nothing.
 
 ## Layout
 
@@ -62,6 +68,7 @@ first build makes its toolchain image, an hour or more; later builds take minute
 | `patches/` | The patches, appended to jellyfin-ffmpeg's own `debian/patches/series`. |
 | `src/` | The protocol's source, from which `patches/9000` is made. |
 | `build.sh`, `Makefile`, `JELLYFIN_TAG` | Building the patched FFmpeg (above). |
+| `fuzz/` | The fuzz harness of FFmpeg's side, its build and its seeds. |
 | `tools/` | Scripts for the development tree (`build_dev.sh`, and the edits it applies). |
 | `bench/` | The measurements behind the protocol's choices, and the scripts that make them. |
 | `audits/` | The audits of each draft. |
