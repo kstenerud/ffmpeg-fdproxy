@@ -37,7 +37,7 @@ Also checked:
 
 **Still to do:**
 - CI, once the repository moves to GitHub;
-- hardware encoders under confinement on real devices (NVENC, VAAPI, QSV).
+- hardware encoders under confinement: NVENC passes on an RTX 3090; VAAPI and QSV are untested.
 
 ## Layout
 
