@@ -42,6 +42,17 @@ Also checked:
 - CI, once the repository moves to GitHub;
 - hardware encoders under confinement: NVENC passes on an RTX 3090; VAAPI and QSV are untested.
 
+## Building
+
+```
+make build-amd64          # or build-arm64; the tarball and its binaries land in dist/
+make test MEDIA=<dir>     # the suite, against dist/bin-amd64, with film.mkv and film-moov-at-end.mp4
+```
+
+`build.sh` checks out jellyfin-ffmpeg at the tag in `JELLYFIN_TAG`, adds `patches/` after
+jellyfin's own `debian/patches/series`, and runs jellyfin's portable builder, which needs Docker. The
+first build makes its toolchain image, an hour or more; later builds take minutes.
+
 ## Layout
 
 | Path | What |
@@ -50,6 +61,7 @@ Also checked:
 | `ffstreamer.dogma` | The protocol's wire format, in [Dogma](https://github.com/kstenerud/dogma). |
 | `patches/` | The patches, appended to jellyfin-ffmpeg's own `debian/patches/series`. |
 | `src/` | The protocol's source, from which `patches/9000` is made. |
+| `build.sh`, `Makefile`, `JELLYFIN_TAG` | Building the patched FFmpeg (above). |
 | `tools/` | Scripts for the development tree (`build_dev.sh`, and the edits it applies). |
 | `bench/` | The measurements behind the protocol's choices, and the scripts that make them. |
 | `audits/` | The audits of each draft. |

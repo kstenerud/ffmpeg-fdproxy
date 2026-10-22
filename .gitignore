@@ -1,2 +1,5 @@
 # Read traces trace.sh makes, from films of the user's own.
 bench/traces/
+# jellyfin-ffmpeg's checkout and builds, made by build.sh.
+build/
+dist/
