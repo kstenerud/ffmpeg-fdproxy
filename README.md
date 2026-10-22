@@ -39,9 +39,6 @@ Also checked:
 - CI, once the repository moves to GitHub;
 - hardware encoders under confinement on real devices (NVENC, VAAPI, QSV).
 
-This repository lives in a sandbox's shared files for now. It moves to GitHub, with its own CI and
-releases, once the protocol and patches are viable.
-
 ## Layout
 
 | Path | What |
@@ -54,10 +51,11 @@ releases, once the protocol and patches are viable.
 | `bench/` | The measurements behind the protocol's choices, and FFmpeg's read traces. |
 | `audits/` | The audits of each draft. |
 | `test/` | A reference server and the tests every build must pass. |
-| `.github/workflows/` | Builds jellyfin-ffmpeg's portable Linux binaries with the patches, for amd64 and arm64. |
 
 ## Licence
 
-FFmpeg and jellyfin-ffmpeg are GPL in the builds this patches, and so are these patches and the
-binaries built with them. Every release publishes the patches and the jellyfin-ffmpeg tag it applies
-to, so its source can always be had.
+The protocol's source (`src/libavformat/ffstreamer.c`, and so `patches/9000`) carries FFmpeg's own
+header, LGPL 2.1 or later, as any file contributed to FFmpeg does. The binaries built with these
+patches are GPL, as jellyfin-ffmpeg's builds are: its configuration enables GPL libraries such as
+x264. Every release publishes the patches and the jellyfin-ffmpeg tag it applies to, so its source
+can always be had.
