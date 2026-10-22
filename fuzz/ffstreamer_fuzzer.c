@@ -1,6 +1,6 @@
 /*
  * A libFuzzer harness for FFmpeg's side of ffstreamer: each input is what the parent sends, fed
- * through a pipe as the protocol reads it, while what the protocol sends back is drained. The
+ * through a pipe as the protocol reads it, and what the protocol sends back kept in another. The
  * protocol opens, reads, seeks and closes as FFmpeg would. Built with AddressSanitizer and
  * UndefinedBehaviorSanitizer by fuzz/build.sh, which says how to run it.
  *
@@ -26,21 +26,21 @@
 #define ff_ffstreamer_protocol fuzz_ffstreamer_protocol
 #include "libavformat/ffstreamer.c"
 
-#include <pthread.h>
+#include <fcntl.h>
+#ifndef F_SETPIPE_SZ
+#define F_SETPIPE_SZ 1031       /* Linux's, which glibc names only under _GNU_SOURCE */
+#endif
 #include <stdint.h>
 #include <stdlib.h>
 
 /* An input a pipe takes whole, so writing it never waits on the protocol. */
 #define MOST_INPUT_BYTES (60 << 10)
 
-static void *drain(void *read_end)
-{
-    uint8_t buffer[4096];
-    int fd = (int)(intptr_t)read_end;
-    while (read(fd, buffer, sizeof(buffer)) > 0)
-        ;
-    return NULL;
-}
+/* What the protocol writes back fits a pipe of this size, so nothing need drain it while it runs: at
+ * most a HELLO, a CAPABILITY and a DONE, and a READ of 18 bytes for each of the input's frames, of
+ * 6 bytes at least: some 180 KiB. A thread to drain it, one per input, made the fuzzer's memory grow
+ * by its sanitizers' record of every thread, until it ran out after two hours. */
+#define BACK_PIPE_BYTES (1 << 20)
 
 int LLVMFuzzerInitialize(int *argc, char ***argv)
 {
@@ -52,7 +52,6 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     int to_ffmpeg[2], from_ffmpeg[2];
-    pthread_t drainer;
     URLContext *h = NULL;
     FFStreamerContext *c;
     uint8_t buffer[64 << 10];
@@ -66,20 +65,18 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         goto end;
     if (pipe(from_ffmpeg) < 0)
         goto close_to;
+    if (fcntl(from_ffmpeg[1], F_SETPIPE_SZ, BACK_PIPE_BYTES) < BACK_PIPE_BYTES)
+        goto close_from;
     if (size && write(to_ffmpeg[1], data, size) != (ssize_t)size)
         goto close_from;
     close(to_ffmpeg[1]);    /* the parent has said all it will */
     to_ffmpeg[1] = -1;
-    if (pthread_create(&drainer, NULL, drain, (void *)(intptr_t)from_ffmpeg[0]))
-        goto close_from;
 
     h = av_mallocz(sizeof(*h));
     c = av_mallocz(sizeof(*c));
     if (!h || !c) {
         av_free(c);
-        close(from_ffmpeg[1]);
-        from_ffmpeg[1] = -1;
-        goto join;
+        goto close_from;
     }
     c->class = &ffstreamer_class;
     av_opt_set_defaults(c);
@@ -107,8 +104,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     }
     av_free(c);
 
-join:
-    pthread_join(drainer, NULL);
 close_from:
     if (from_ffmpeg[0] >= 0)
         close(from_ffmpeg[0]);
