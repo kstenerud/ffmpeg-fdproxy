@@ -39,7 +39,6 @@ Also checked:
   session or the process group all fail.
 
 **Still to do:**
-- CI, once the repository moves to GitHub;
 - hardware encoders under confinement: NVENC passes on an RTX 3090; VAAPI and QSV are untested.
 
 ## Building
@@ -49,11 +48,12 @@ make build-amd64          # or build-arm64; the tarball and its binaries land in
 make media                # the suite's two films, made from FFmpeg's test sources into media/
 make test                 # the suite, against dist/bin-amd64, with the films in media/
 make fuzz                 # FFmpeg's side fuzzed for 10 minutes under ASan and UBSan
+make check-patch          # patches/9000 carries src/libavformat/ffstreamer.c as it stands
 ```
 
-`build.sh` checks out jellyfin-ffmpeg at the tag in `JELLYFIN_TAG`, adds `patches/` after
-jellyfin's own `debian/patches/series`, and runs jellyfin's portable builder, which needs Docker. The
-first build makes its toolchain image, an hour or more; later builds take minutes.
+`checkout.sh` checks out jellyfin-ffmpeg at the tag in `JELLYFIN_TAG`, adds `patches/` after
+jellyfin's own `debian/patches/series`, and `build.sh` runs jellyfin's portable builder on it, which
+needs Docker. The first build makes its toolchain image, an hour or more; later builds take minutes.
 
 `make media` writes the suite's films with the patched FFmpeg's own test sources
 (`test/make_media.py`): five minutes of 720p H.264, a 5.1 and a stereo track, subtitles and
@@ -73,12 +73,25 @@ FFmpeg built the same way, and runs it on eight workers from the seeds in `fuzz/
 | `ffstreamer.dogma` | The protocol's wire format, in [Dogma](https://github.com/kstenerud/dogma). |
 | `patches/` | The patches, appended to jellyfin-ffmpeg's own `debian/patches/series`. |
 | `src/` | The protocol's source, from which `patches/9000` is made. |
-| `build.sh`, `Makefile`, `JELLYFIN_TAG` | Building the patched FFmpeg (above). |
+| `checkout.sh`, `build.sh`, `Makefile`, `JELLYFIN_TAG` | Building the patched FFmpeg (above). |
 | `fuzz/` | The fuzz harness of FFmpeg's side, its build and its seeds. |
-| `tools/` | Scripts for the development tree (`build_dev.sh`, and the edits it applies). |
+| `tools/` | `check_patch.py`, and scripts for the development tree (`build_dev.sh`, and the edits it applies). |
+| `.github/workflows/` | CI and releases (below). |
 | `bench/` | The measurements behind the protocol's choices, and the scripts that make them. |
 | `audits/` | The audits of each draft. |
 | `test/` | A reference server and the tests every build must pass. |
+
+## CI and releases
+
+`.github/workflows/`:
+- **ci**, on every pull request and push to main: the patch check, five minutes of fuzzing, then
+  the build and the suite on amd64 and arm64, each on its own architecture. A build starts cold,
+  about an hour, because jellyfin's toolchain cache is larger than an Actions cache.
+- **fuzz-weekly**: five hours of fuzzing every Sunday.
+- **release**, on a tag `v<jellyfin version>-<n>` (`v8.1.2-5-1` is the first release on
+  jellyfin-ffmpeg v8.1.2-5): the same build and suite, then a release holding
+  `ffmpeg-ffstreamer_<version>_linux64-gpl.tar.xz`, `…_linuxarm64-gpl.tar.xz` and `SHA256SUMS`. The
+  tarballs are laid out as jellyfin's portable ones, `ffmpeg` and `ffprobe` at the root.
 
 ## Licence
 

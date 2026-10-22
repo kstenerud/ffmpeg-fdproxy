@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds the libFuzzer harness of ffstreamer's FFmpeg side, with AddressSanitizer and
 # UndefinedBehaviorSanitizer, against a minimal FFmpeg built the same way from jellyfin-ffmpeg: either
-# build.sh's checkout, whose debian/patches/series it applies with quilt into OUT_DIR/src, or a tree
+# checkout.sh's checkout, whose debian/patches/series it applies with quilt into OUT_DIR/src, or a tree
 # with the series already applied.
 #
 #     fuzz/build.sh SOURCE_TREE OUT_DIR
@@ -22,10 +22,13 @@ apt-get update -qq >/dev/null
 apt-get install -y -qq clang make pkg-config quilt >/dev/null 2>&1
 src=/src
 if [ ! -d /src/.pc ]; then
-    if [ ! -f /out/src/.pc/applied-patches ]; then
+    # The applied copy is made again whenever the series or a patch changed, or it would fuzz old code.
+    series=$(cat /src/debian/patches/series /src/debian/patches/*.patch | sha256sum)
+    if [ ! -f /out/src/.pc/applied-patches ] || [ "$(cat /out/src.series 2>/dev/null)" != "$series" ]; then
         rm -rf /out/src && mkdir -p /out/src
         tar -C /src --exclude=.git -cf - . | tar -C /out/src -xf -
         (cd /out/src && QUILT_PATCHES=debian/patches quilt push -a -q > /dev/null)
+        echo "$series" > /out/src.series
     fi
     src=/out/src
 fi

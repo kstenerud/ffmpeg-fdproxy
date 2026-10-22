@@ -1,6 +1,6 @@
 #!/bin/sh
-# Builds FFmpeg with the ffstreamer patches: jellyfin-ffmpeg at the tag JELLYFIN_TAG names, these
-# patches applied after jellyfin's own series, built by jellyfin's portable builder.
+# Builds FFmpeg with the ffstreamer patches: checkout.sh's jellyfin-ffmpeg, at the tag JELLYFIN_TAG
+# names with these patches after jellyfin's own series, built by jellyfin's portable builder.
 #
 #     build.sh ARCH OUT_DIR
 #
@@ -16,20 +16,9 @@ here=$(cd "$(dirname "$0")" && pwd)
 arch=$1
 mkdir -p "$2"
 out=$(cd "$2" && pwd)
-tag=$(cat "$here/JELLYFIN_TAG")
 work="$here/build/jellyfin-ffmpeg"
 
-if [ ! -d "$work/.git" ]; then
-    git clone --filter=blob:none https://github.com/jellyfin/jellyfin-ffmpeg "$work"
-fi
-git -C "$work" fetch --quiet --tags
-git -C "$work" checkout --quiet --force "$tag"
-# The series as jellyfin ships it, then ours after it.
-git -C "$work" checkout --quiet -- debian/patches
-for patch in "$here"/patches/*.patch; do
-    cp "$patch" "$work/debian/patches/"
-    basename "$patch" >> "$work/debian/patches/series"
-done
+"$here/checkout.sh"
 cd "$work"
 ./build-linux-"$arch" "$out"
 case $arch in amd64) name=linux64 ;; arm64) name=linuxarm64 ;; esac

@@ -4,10 +4,19 @@ OUT   ?= dist
 BIN   ?= dist/bin-amd64
 MEDIA ?= media
 FUZZ_SECONDS ?= 600
+FUZZ_JOBS ?= 8
 
 .PHONY: help
 help: ## List the targets
 	@grep -E '^[a-z0-9-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-14s %s\n", $$1, $$2}'
+
+.PHONY: check-patch
+check-patch: ## Check that patches/9000 adds src/libavformat/ffstreamer.c as it stands
+	python3 tools/check_patch.py
+
+.PHONY: checkout
+checkout: ## Check out jellyfin-ffmpeg at JELLYFIN_TAG into build/, with patches/ after its series
+	./checkout.sh
 
 .PHONY: build-amd64
 build-amd64: ## Build the patched FFmpeg for linux/amd64 into OUT (default dist/); needs Docker
@@ -26,11 +35,11 @@ test: ## Run the suite against BIN (default dist/bin-amd64) with MEDIA (film.mkv
 	python3 test/suite.py --bin $(BIN) --media $(MEDIA)
 
 .PHONY: fuzz
-fuzz: ## Fuzz FFmpeg's side for FUZZ_SECONDS (default 600) under ASan and UBSan; needs make build-amd64's checkout
+fuzz: checkout ## Fuzz FFmpeg's side for FUZZ_SECONDS (default 600) on FUZZ_JOBS workers under ASan and UBSan
 	fuzz/build.sh build/jellyfin-ffmpeg build/fuzz
 	rm -rf build/fuzz/corpus && mkdir -p build/fuzz/corpus && cp fuzz/corpus/* build/fuzz/corpus/
 	docker run --rm -v "$$PWD/build/fuzz":/work -w /work debian:trixie \
-		./ffstreamer_fuzzer -max_len=61440 -max_total_time=$(FUZZ_SECONDS) -jobs=8 -workers=8 corpus
+		./ffstreamer_fuzzer -max_len=61440 -max_total_time=$(FUZZ_SECONDS) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS) corpus
 	@! ls build/fuzz/crash-* build/fuzz/leak-* build/fuzz/timeout-* build/fuzz/oom-* 2>/dev/null
 
 .PHONY: clean

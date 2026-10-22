@@ -1,0 +1,53 @@
+# Builds the patched FFmpeg for one architecture and runs the suite on it, on that architecture.
+# ci.yml and release.yml call it. A build starts cold: jellyfin's toolchain image takes about an hour
+# (its cache, 7 GB per architecture, is larger than a repository's Actions cache).
+name: build
+
+on:
+  workflow_call:
+    inputs:
+      arch:
+        description: amd64 or arm64
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ inputs.arch }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Make room for the toolchain image
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune --all --force
+          df -h /
+      - name: Build
+        run: make build-${{ inputs.arch }} OUT=dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ffmpeg-${{ inputs.arch }}
+          path: dist/*.tar.xz
+          if-no-files-found: error
+
+  suite:
+    name: suite (${{ inputs.arch }})
+    needs: build
+    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ffmpeg-${{ inputs.arch }}
+          path: dist
+      - name: Unpack
+        run: mkdir -p dist/bin && tar -xJf dist/*.tar.xz -C dist/bin
+      - name: Make the films
+        run: make media BIN=dist/bin
+      - name: Suite
+        run: make test BIN=dist/bin

@@ -1,0 +1,54 @@
+# On every pull request and every push to main: the patch check and a short fuzz first, which take
+# minutes, then the build and the suite on both architectures, which take over an hour.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-patch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: make check-patch
+
+  fuzz:
+    needs: check-patch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Fuzz for 5 minutes
+        run: make fuzz FUZZ_SECONDS=300 FUZZ_JOBS="$(nproc)"
+      - name: Keep what it found
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-findings
+          path: |
+            build/fuzz/crash-*
+            build/fuzz/leak-*
+            build/fuzz/timeout-*
+            build/fuzz/oom-*
+            build/fuzz/fuzz-*.log
+          if-no-files-found: ignore
+
+  build:
+    needs: check-patch
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    uses: ./.github/workflows/build.yml
+    with:
+      arch: ${{ matrix.arch }}

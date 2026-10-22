@@ -1,0 +1,60 @@
+# On a tag v<jellyfin version>-<n> (v8.1.2-5-1: jellyfin-ffmpeg v8.1.2-5, these patches' first release on
+# it): build both architectures, run the suite on each, and publish the two tarballs with their SHA-256
+# sums. The tarballs hold ffmpeg and ffprobe at their root, as jellyfin's portable ones do.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  check-tag:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The tag names the pinned jellyfin-ffmpeg
+        run: |
+          case "$GITHUB_REF_NAME" in
+            "$(cat JELLYFIN_TAG)"-[0-9]*) ;;
+            *) echo "tag $GITHUB_REF_NAME does not start with $(cat JELLYFIN_TAG)-<n>"; exit 1 ;;
+          esac
+      - run: make check-patch
+
+  build:
+    needs: check-tag
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    uses: ./.github/workflows/build.yml
+    with:
+      arch: ${{ matrix.arch }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: ffmpeg-*
+          path: built
+      - name: Name the tarballs and sum them
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          mkdir release
+          cp built/ffmpeg-amd64/*_portable_linux64-gpl.tar.xz "release/ffmpeg-ffstreamer_${version}_linux64-gpl.tar.xz"
+          cp built/ffmpeg-arm64/*_portable_linuxarm64-gpl.tar.xz "release/ffmpeg-ffstreamer_${version}_linuxarm64-gpl.tar.xz"
+          (cd release && sha256sum -- *.tar.xz > SHA256SUMS && cat SHA256SUMS)
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "jellyfin-ffmpeg ${GITHUB_REF_NAME%-*} with the ffstreamer protocol, for linux/amd64 and linux/arm64. Built and tested by this release's workflow run; SHA256SUMS lists each tarball's SHA-256. GPL, as the FFmpeg build it patches."
