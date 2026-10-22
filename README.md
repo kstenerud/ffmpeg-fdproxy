@@ -16,25 +16,28 @@ five audits ([audits/](audits/)). The patches are written:
 - `patches/9001-fftools-input-errors.patch`: ffmpeg and ffprobe exit non-zero when an input's reads
   failed.
 
-**Built with jellyfin-ffmpeg's own toolchain** (8.1.2-5, linux64-gpl), on a 12-core machine:
+**Built with jellyfin-ffmpeg's own toolchain** (8.1.2-5, linux64-gpl and linuxarm64-gpl), on a
+12-core machine:
 - **The unpatched build reproduces jellyfin's release:** its build configuration, encoders and
   hardware accelerators are identical to the published binary.
 - **The patched build differs only by the `ffstreamer` protocol.**
-- **Build times:** 74 minutes cold, 7 minutes warm, with the toolchain image cached.
+- **Build times:** amd64 74 minutes cold, 7 warm; arm64 64 minutes cold (its cross toolchain).
 
-**The suite** (`test/suite.py`, 26 cases) passes against the release build:
+**The suite** (`test/suite.py`, 26 cases) passes on both architectures: amd64, and arm64 on an
+Apple M4 under OrbStack (Linux 7.0):
 - every run shape a media server uses, byte-identical read directly and through the protocol;
 - every failure path as PROTOCOL.md specifies.
 
-Also checked, byte-identical:
-- a libx264 chunk encode;
-- an HLS fMP4 prepare (52 files).
+Also checked:
+- byte-identical: a libx264 chunk encode, and an HLS fMP4 prepare (52 files);
+- NVENC on an RTX 3090 through the protocol, frame-identical to a direct run;
+- under a parent's confinement (Landlock and the seccomp filter of PROTOCOL.md §9.1) on amd64 and
+  arm64: a threaded libx264 encode and ffprobe run normally, and starting a process, leaving the
+  session or the process group all fail.
 
 **Still to do:**
-- arm64;
-- runs under a parent's confinement (Landlock, and the new seccomp filter);
-- hardware encoders on real devices;
-- CI, once the repository moves to GitHub.
+- CI, once the repository moves to GitHub;
+- hardware encoders under confinement on real devices (NVENC, VAAPI, QSV).
 
 This repository lives in a sandbox's shared files for now. It moves to GitHub, with its own CI and
 releases, once the protocol and patches are viable.
