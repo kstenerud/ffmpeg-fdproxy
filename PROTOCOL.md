@@ -8,7 +8,8 @@
   ([audits/2026-10-22-draft-5-review.md](audits/2026-10-22-draft-5-review.md)), which judged it ready
   once its findings were in, with no further review.
 
-§14 lists what is still to set by measurement.
+§14 lists what is still to set by measurement. The wire format is also given formally, in Dogma, in
+[ffstreamer.dogma](ffstreamer.dogma); where the two differ, this document is the one to fix.
 
 **What changed since draft 4:**
 - **`DONE(TERMS)` is sent from the open,** since FFmpeg never calls the close of an open that failed.

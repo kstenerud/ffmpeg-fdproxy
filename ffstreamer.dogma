@@ -1,0 +1,178 @@
+dogma_v1 utf-8
+- identifier  = ffstreamer_v1
+- description = ffstreamer: the read protocol between FFmpeg and the parent that serves its input, version 1
+- reference   = PROTOCOL.md (draft 6)
+- dogma       = https://github.com/kstenerud/dogma/blob/master/v1/dogma_v1.0.md
+
+# A channel is two pipes, one each way (PROTOCOL.md §4). This grammar describes the bytes on either
+# one, from the first byte to the writer's end. Which of the two a pipe is comes from the descriptor
+# it was handed, never from what it carries.
+#
+# Not expressible here, and stated in PROTOCOL.md:
+# - the number of READs outstanding at once (§7.4), which pairs the two pipes in time;
+# - that the parent sends nothing more after a violation, and kills FFmpeg instead (§9.2);
+# - that FFmpeg sends no DONE before a well-formed REQUEST has arrived (§7.5);
+# - the checks of §8, which a reader must make without overflowing.
+
+ffstreamer_pipe = byte_order(lsb, [
+                    pipe = written_by_ffmpeg : ffmpeg_to_parent;
+                    pipe = written_by_parent : parent_to_ffmpeg;
+                  ]);
+
+written_by_ffmpeg = 1;
+written_by_parent = 2;
+pipe: uinteger    = """
+Which pipe of the channel this is: `written_by_ffmpeg` for the one FFmpeg writes and the parent
+reads (FFmpeg's -ffstreamer_write_fd), `written_by_parent` for the one the parent writes and FFmpeg
+reads (FFmpeg's -ffstreamer_read_fd).
+""";
+
+
+###############################################################################
+# FFmpeg to the parent
+###############################################################################
+
+# FFmpeg numbers every frame it sends: HELLO is 0, and each later frame takes the next number,
+# wrapping from 127 to 0. A pipe may end after any whole frame: FFmpeg writes each frame with one
+# write() of at most 4,096 bytes, so a kill never leaves half of one (§5).
+ffmpeg_to_parent         = hello
+                         & (capability(1) & reads_then_done(2)?)?
+                         & eod
+                         ;
+
+# READs until DONE, or until FFmpeg exits without one (§7.5: a kill, a crash, an exit() mid-run).
+reads_then_done(sequence) = read(sequence) & reads_then_done(next(sequence))?
+                          | done(sequence)
+                          ;
+next(sequence)           = (sequence + 1) % 128;
+
+
+###############################################################################
+# The parent to FFmpeg
+###############################################################################
+
+# Every parent frame is an answer, and echoes the number of the frame it answers, oldest first (§6).
+# REQUEST answers CAPABILITY (1). The DATA frames answer FFmpeg's READs in their order, so they
+# carry the numbers from 2 on. The parent answers no READ after DONE, and none once it has decided
+# to kill FFmpeg, so the DATA frames may stop short of the READs.
+parent_to_ffmpeg         = hello
+                         & (request(1) & answers(2)?)?
+                         & eod
+                         ;
+answers(sequence)        = data(sequence) & answers(next(sequence))?;
+
+
+###############################################################################
+# Frames (§5)
+###############################################################################
+
+frame(type, sequence, lengths, body) = i8(type)
+                                     & i8(sequence)
+                                     & i32(var(length, lengths))
+                                     & sized(length * 8, body)
+                                     ;
+
+type_hello      = 1;
+type_capability = 2;
+type_request    = 3;
+type_read       = 4;
+type_data       = 5;
+type_done       = 6;
+
+
+###############################################################################
+# Messages (§7)
+###############################################################################
+
+# HELLO, from both sides, is frozen in every version, its header included: type 1, sequence 0,
+# length 4, then the range of versions the sender speaks. The parent's echoes FFmpeg's 0.
+hello                    = i8(type_hello)
+                         & i8(0)
+                         & i32(4)
+                         & i16(var(lowest, 1~))
+                         & i16(lowest~)
+                         ;
+
+capability(sequence)     = frame(type_capability, sequence, 9,
+                             i32(var(preferred_block, 1~))    # preferred block size
+                           & i32(preferred_block~)            # largest DATA body it accepts
+                           & i8(1~16)                         # most READs it can have outstanding
+                           );
+
+request(sequence)        = frame(type_request, sequence, 27,
+                             i16(negotiated_version)          # a cross-check of the version
+                           & i64(1~)                          # run: the parent's identifier for it
+                           & i64(0~)                          # file size
+                           & i32(var(block, 1~capability_largest_body))
+                           & i32(block~capability_largest_body) # longest READ
+                           & i8(1~capability_outstanding)     # READs outstanding
+                           );
+
+read(sequence)           = frame(type_read, sequence, 12,
+                             i64(var(offset, 0~terms_file_size))
+                           & i32((1~terms_longest_read) ! ((terms_file_size - offset + 1)~))
+                           );
+
+data(sequence)           = frame(type_data, sequence, read_length(sequence), byte*);
+
+done(sequence)           = frame(type_done, sequence, 9~1040,
+                             i64(terms_run | 0)               # 0 when REQUEST's run broke its rule
+                           & (done_ok | done_err)
+                           );
+done_ok                  = i8(0);
+done_err                 = i8(1)
+                         & i8(done_terms | done_channel | done_protocol | done_interrupted)
+                         & i32(0~)                            # FFmpeg's error code, negated
+                         & i16(var(message_length, 0~1024))
+                         & byte{message_length}               # for the logs; any bytes
+                         ;
+done_terms       = 1; # FFmpeg's side declined REQUEST's terms, or could not take them up
+done_channel     = 2; # the channel to the parent ended: the parent died
+done_protocol    = 3; # the parent broke the protocol: a wrong type, number or length
+done_interrupted = 4; # FFmpeg's interrupt callback fired while the channel waited
+
+
+###############################################################################
+# Values one pipe takes from the other
+###############################################################################
+
+negotiated_version: uinteger = """
+The version both sides worked out from the two HELLOs (§7.1): the lower of the two highest, valid
+when it is at least the higher of the two lowest. Version 1 is the one this grammar describes.
+""";
+
+capability_largest_body: uinteger = """
+The largest DATA body FFmpeg's CAPABILITY said it accepts.
+""";
+
+capability_outstanding: uinteger = """
+The most READs outstanding FFmpeg's CAPABILITY said it can have.
+""";
+
+terms_run: uinteger = """
+The run REQUEST gave.
+""";
+
+terms_file_size: uinteger = """
+The file size REQUEST gave.
+""";
+
+terms_longest_read: uinteger = """
+The longest READ REQUEST allowed.
+""";
+
+read_length(sequence: uinteger): uinteger = """
+The length of the READ numbered `sequence` that this DATA answers: the oldest READ outstanding. A
+DATA body is exactly the bytes that READ asked for.
+""";
+
+
+###############################################################################
+# Integers: signed, two's complement, little-endian (§5)
+###############################################################################
+
+byte    = uint(8, ~);
+i8(v)   = sint(8, v);
+i16(v)  = ordered(sint(16, v));
+i32(v)  = ordered(sint(32, v));
+i64(v)  = ordered(sint(64, v));

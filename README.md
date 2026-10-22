@@ -44,6 +44,7 @@ releases, once the protocol and patches are viable.
 | Path | What |
 | --- | --- |
 | `PROTOCOL.md` | The wire protocol between FFmpeg and the process that serves its reads. |
+| `ffstreamer.dogma` | The protocol's wire format, in [Dogma](https://github.com/kstenerud/dogma). |
 | `patches/` | The patches, appended to jellyfin-ffmpeg's own `debian/patches/series`. |
 | `src/` | The protocol's source, from which `patches/9000` is made. |
 | `tools/` | Scripts for the development tree (`build_dev.sh`, and the edits it applies). |
