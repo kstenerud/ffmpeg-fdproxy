@@ -1,282 +1,356 @@
-# The read protocol: draft 1, for discussion
+# The read protocol: draft 2
 
-**Status:** draft 1, 2026-10-22. Nothing here is decided. Each choice that is open says so, gives its
-options, and gives a recommendation (**R**). After discussion it goes through several independent
-audits before any patch is written.
+**Status:** draft 2, 2026-10-22, from the author's discussion of draft 1. It goes to independent audits
+next; no patch is written until it has survived them. What is still open is listed in §12.
 
 ## 1. What it is for
 
-A parent process (here, a media server's node) runs FFmpeg to read a film. Instead of FFmpeg opening
-the film, the parent hands FFmpeg descriptors at its start and serves every read FFmpeg makes, by
-byte offset. Then:
+A parent process, here a media server's node, runs FFmpeg to read a film. FFmpeg does not open the
+film. The parent hands FFmpeg a channel at its start and serves every byte FFmpeg reads of its
+input, by offset. Then:
 
 - **FFmpeg never touches the storage.** A dead network share blocks a thread of the parent, which
-  knows and decides; never FFmpeg, in the kernel, where it cannot be killed.
-- **Every read is the parent's to schedule:** to order against other work on the same disk, pace,
-  share between consumers, read ahead, or refuse.
-- **FFmpeg needs no path to the film and no socket.** Its confinement can stay as tight as it is
-  today (Landlock with no media file granted; seccomp refusing `socket` and `socketpair`).
-- **The parent knows what was read.** A run whose input broke can never pass as complete.
+  knows and decides. It never blocks FFmpeg in the kernel, where it cannot be killed.
+- **Every read is the parent's to schedule:** to order against other work on the same disk, to pace,
+  to read ahead, to share between consumers.
+- **FFmpeg needs no path to the film and creates no socket.** Its confinement stays as tight as today:
+  Landlock with no media file granted, and seccomp refusing `socket` and `socketpair`.
+- **The parent judges every run.** A run whose input could not be read in full never passes as
+  complete.
 
-It reads only. Writing FFmpeg's outputs this way is out of scope for version 1. Its message types are
-reserved (§5.6) so that a later version can add it.
+**Scope.** The protocol carries only the input's bytes:
 
-## 2. Requirements
+- **The job stays on FFmpeg's command line,** where its confinement already needs it: which outputs
+  it may write, whether it uses a GPU.
+- **FFmpeg writes its own outputs** to local disk as today: files, and results on stdout.
 
-Each comes from a test or an audit: the wargame of an LD_PRELOAD shim speaking the same kind of
-channel (an earlier wargame, not published), and
-the tests before it.
+## 2. Roles
 
-| # | Requirement | Why |
+| | The parent (the node) | FFmpeg's side (this patch) |
 | --- | --- | --- |
-| Q1 | Seekable: any offset, any time, and the size | Probes read an MP4's index at its end; chunk runs seek; pipes can't (tested) |
-| Q2 | No socket created by FFmpeg, and no filesystem path | FFmpeg's seccomp refuses sockets (N1); Landlock grants no media file |
-| Q3 | Never desynchronises: an answer is always matched to its request, or the channel is dead for good | A late answer taken for the next one gave 559 of 35,413 frames, exit 0 (tested) |
-| Q4 | Every failure of the channel or the storage fails the run visibly | FFmpeg exits 0 with a partial result when its input breaks (tested, more than once) |
-| Q5 | FFmpeg stays interruptible while it waits: a stop ends it cleanly, with its outputs' trailers written | A read waiting on a pipe ignored SIGINT and SIGTERM (tested) |
-| Q6 | The parent owns every timeout. FFmpeg's side never gives up on its own | A side that gives up desynchronises, or turns a slow disk into a failed film |
-| Q7 | Bounded: no message, allocation or number of open inputs is unbounded, on either side | A hostile file asks for ~2 GiB reads; a hostile concat reopens without end (tested) |
-| Q8 | Performant: the parent sees reads large enough to schedule well, and the overhead is small beside decoding | One scheduled read per 32 KiB made a 6 s chunk take 19.5 s under load (simulated) |
-| Q9 | Several inputs in one run never block or corrupt each other | Two inputs on one channel crossed bytes (tested) |
-| Q10 | Versioned: an FFmpeg and a parent of different versions refuse each other plainly | The binaries and the node are released separately |
-| Q11 | General: nothing in FFmpeg's side knows the parent, so it can be offered upstream | Smaller fork; others have the same need |
+| Decides | what is read, the terms, the time a run may take, and whether a run succeeded | what to ask for and when, within the terms (including prefetching) |
+| Does | creates the channels, launches FFmpeg, reads the storage, sends the bytes | asks, waits, hands the bytes to FFmpeg's demuxer |
+| Trusts | nothing FFmpeg sends: FFmpeg may have been taken over by a crafted film | the parent |
+| Ends a run | by killing FFmpeg, for any reason it chooses, at any time | by exiting, after sending `DONE` |
 
-## 3. Where it sits in FFmpeg
+There is no message to stop or abort. The parent kills FFmpeg instead (SIGKILL of its process group).
 
-**A URL protocol** in libavformat: `libavformat/<name>.c`, registered in `protocols.c` and its
-Makefile, about 300 lines. The FFmpeg CLI and every demuxer are untouched. An input is named
-`<name>:` with its descriptors as protocol options, the way the `fd:` protocol takes `-fd`.
+## 3. Channels
 
-**A second, small patch to fftools.** When an input fails with an I/O error, FFmpeg exits non-zero,
-where today it finishes the outputs and exits 0. This is defence in depth: the parent judges success
-from what it served (Q4) whatever FFmpeg says.
+- **One channel per input:** two pipes, one each way, created by the parent and inherited by FFmpeg
+  at dedicated descriptors. stdin, stdout and stderr are never used: stdout carries results, and a
+  stray write to it would corrupt a channel.
+- The parent sets each pipe's buffer to 1 MiB (`F_SETPIPE_SZ`). The default 64 KiB halved throughput
+  in measurement ([bench/RESULTS.md](bench/RESULTS.md)).
+- Each input names its channel's descriptors as protocol options:
+  `-NAME_read_fd 7 -NAME_write_fd 8 -i NAME:`. Here `read_fd` is where FFmpeg reads the parent's
+  messages, and `write_fd` where it writes its own.
+- Opening a channel a second time in one run, for example a demuxer reopening its input or a crafted
+  concat list naming it, fails at once, and FFmpeg's side sends nothing more on it.
+- The parent writes into the pipe with `splice` from the file where it can, which saves a copy
+  (measured: about 0.6–0.7 CPU-seconds per GB against 1.4 for a copy through the parent's memory).
 
-**Open: the protocol's name.**
-- `fdpair:` says what it is, and suits upstream.
-- `ipcread:` says what it does.
+## 4. Frames
 
-**R:** a generic name, `fdpair:`, unless the design moves away from a descriptor pair.
+**The header.** Every message is a frame with a 6-byte header, followed by the body:
 
-## 4. The choices to make
-
-### 4.1 Transport
-
-| Option | For | Against |
+| Field | Type | Notes |
 | --- | --- | --- |
-| **a. Two pipes per input**, one each way, created by the parent and inherited | Works on every Unix and on Windows (anonymous pipes); no socket anywhere; simplest | A pipe is a byte stream, so framing is the protocol's job; data copies through the kernel twice |
-| **b. A `SOCK_SEQPACKET` socketpair per input**, created by the parent and inherited | Message boundaries kept by the kernel, so a frame arrives whole or not at all; one descriptor | Still a socket inside FFmpeg, though one it didn't create (seccomp forbids creating, not using); Linux-only semantics; harder to argue N1 still holds |
-| **c. Shared memory** (a `memfd` the parent maps and hands down) **for data, a pipe for control** | One copy fewer: the parent reads the disk straight into memory FFmpeg reads from | Much more to get right: buffer ownership, recycling, a hostile FFmpeg scribbling on shared pages; worth it only if copying shows in profiles |
+| type | int8 | §6. 0 is never a valid type |
+| sequence | int8 | §5 |
+| length | int32 | the body's length in bytes; the type sets its bounds |
 
-**R: a.** Two pipes, with framing as the protocol's job (§5). Measured: pipes carry well over a
-GB/s at 1 MiB writes, above any disk the node reads. Keep (c) in reserve, behind the version number,
-if profiles ever show the copies.
+**Integers.** All integers are signed and little-endian, and a negative value anywhere is a violation.
+The rule catches overflow and corrupted framing early.
 
-### 4.2 Channels: one per input, or one per run with handles
+**Delimiting.** The type determines everything in the body. Every variable-length field is
+delimited by its own length (an int16 before a text's bytes), even where the frame's length could
+imply it.
 
-**R: one channel per input.**
-- The parent knows a run's inputs when it builds the command, so it hands each `-i` its own pair.
-- One input waiting on a dead share can't block another (Q9). No two threads ever share a channel's
-  framing (W2).
-- An attempt to open the same channel twice (a demuxer reopening its input, a hostile concat) is
-  refused, loudly (Q7).
+**Sizes.**
+- Every frame FFmpeg's side sends is at most 4,096 bytes and is written with a single `write()`.
+  The kernel then delivers it whole (`PIPE_BUF`), so a well-behaved FFmpeg can never leave the parent
+  holding half a frame.
+- `DATA` frames are as long as their `READ` asked, up to the agreed maximum (§6.4), and arrive over
+  several pipe-fulls.
 
-### 4.3 Who decides the size of a read
+**Reading.** Each side reads what is in the pipe into its own buffer and carves frames out of it. A
+short read and two frames in one read are both normal. A side never reads a frame body without first
+reading its header.
 
-FFmpeg's I/O layer asks for 32 KiB at a time. Its packets can ask for 24 MB in one read.
+## 5. Sequence numbers
 
-| Option | How |
+FFmpeg's side numbers every message it sends:
+- `HELLO` is 0, and each later message the next number;
+- numbers wrap from 127 back to 0: `(n + 1) mod 128`;
+- every message takes a number, even one that gets no answer.
+
+The parent's every message is an answer, and echoes the number of the message it answers. Each
+answer maps to exactly one request. The parent checks that every number is the one it expects next;
+FFmpeg's side checks that every answer echoes an outstanding request's number. At most a handful of
+requests are outstanding at once, so a wrap can never confuse two answers.
+
+## 6. Messages
+
+| Type | Code | From | Answered by | Body |
+| --- | --- | --- | --- | --- |
+| `HELLO` | 1 | both | the parent's `HELLO` | §6.1 |
+| `CAPABILITY` | 2 | FFmpeg | `REQUEST` | §6.2 |
+| `REQUEST` | 3 | parent | `ACCEPT` or `DECLINE` (as the next message, not an echo) | §6.3 |
+| `ACCEPT` | 4 | FFmpeg | — | empty |
+| `DECLINE` | 5 | FFmpeg | — | §6.5 |
+| `READ` | 6 | FFmpeg | `DATA` | §6.4 |
+| `DATA` | 7 | parent | — | the bytes |
+| `DONE` | 8 | FFmpeg | — | §6.6 |
+
+### 6.1 `HELLO`
+
+The only message whose form never changes, in any version. Its body is exactly 4 bytes:
+
+| Field | Type |
 | --- | --- |
-| **a. FFmpeg's side reads in blocks** | It asks for a fixed block (1 MiB, an option) aligned to the block size, keeps the last block or two, and answers FFmpeg's small reads from them. The parent sees 1 MiB reads |
-| **b. The parent reads ahead** | It answers the 32 KiB asked, but reads 1 MiB from the disk and keeps the rest for the next request. Every 32 KiB still costs a round trip of the channel |
-| **c. Both** | Blocks on FFmpeg's side, and read-ahead on the parent's for sequential runs |
+| lowest protocol version this side speaks | int16 |
+| highest version this side speaks | int16 |
 
-**R: c.**
-- FFmpeg's side asks in blocks: a round trip per MiB, not per 32 KiB.
-- The parent reads ahead what its scheduler and the run's pattern justify: one more block for a
-  sequential read, none for a probe.
-- The block size is negotiated (§5.2): the parent says its preferred block and its largest answer.
+FFmpeg's side sends its `HELLO` (sequence 0) as soon as the input is opened. The parent reads it, and
+then:
 
-### 4.4 Requests in flight
+- **If the ranges overlap,** it answers with its own `HELLO`, echoing 0.
+- **If they don't,** it logs both ranges and kills FFmpeg, without answering.
 
-| Option | For | Against |
+Each side then works out the version itself:
+
+    version = min(FFmpeg's highest, the parent's highest)
+    valid when version >= max(FFmpeg's lowest, the parent's lowest)
+
+Every later message is in that version's form.
+
+### 6.2 `CAPABILITY` (version 1)
+
+What FFmpeg's side can do, and what it prefers:
+
+| Field | Type | Notes |
 | --- | --- | --- |
-| **a. One at a time per channel** | Simplest; desync impossible | Disk latency and processing never overlap |
-| **b. At most two:** the block FFmpeg needs, and the next one prefetched while FFmpeg works | Overlap for sequential reads; still bounded | A seek makes the prefetch worthless. Its answer is still read and dropped, matched by sequence number, never abandoned |
+| preferred block size | int32 | bytes; 1 MiB in this patch |
+| largest `DATA` body it accepts | int32 | bytes; what it can buffer |
+| most `READ`s it can have in flight | int8 | 2 in this patch |
 
-**R: b, with the limit negotiated** (1 or 2). A prefetch is only a hint: the parent may answer it at
-the back of its queue, or with "not now" (§5.4). And since the parent reads ahead too (4.3), version 1
-could start with one in flight and measure.
+### 6.3 `REQUEST` (version 1)
 
-### 4.5 Waiting, stopping and timeouts
+The parent's terms for this input. It echoes `CAPABILITY`'s sequence.
 
-**The rule: FFmpeg's side never times out a request (Q6).**
-- It waits for the answer in short polls (100 ms), and between polls it checks FFmpeg's interrupt
-  callback.
-- When FFmpeg is asked to stop (`q`, SIGINT, SIGTERM, or the API's interrupt), the read returns
-  `AVERROR_EXIT`. FFmpeg ends its outputs cleanly, with trailers written (Q5).
-- The request is left behind, so the channel is closed, not reused.
-
-The parent owns every time limit:
-- It ends a run by answering the waiting read with an error, then, if that doesn't end it, with
-  SIGKILL.
-- It never treats a quiet channel as dead: a paused or slow FFmpeg is quiet for hours.
-- It detects FFmpeg's end by its exit, not by end-of-file on a pipe.
-
-**Open:** should the protocol honour FFmpeg's own `-rw_timeout`? **R: no.** The parent owns time, and
-two timers disagree.
-
-### 4.6 Errors
-
-An answer's status says what happened, and FFmpeg's side maps each to its error:
-
-| Status | Means | FFmpeg sees |
+| Field | Type | Notes |
 | --- | --- | --- |
-| `OK` | Data follows, between 1 byte and the length asked | the bytes |
-| `EOF` | The offset is at or past the end | `AVERROR_EOF` |
-| `IO` | The storage failed the read (a dead disk, a bad sector) | `AVERROR(EIO)` |
-| `CHANGED` | The file changed since it was opened: replaced, truncated, grown | `AVERROR(ESTALE)` |
-| `STOP` | The parent is ending the run | `AVERROR_EXIT`: FFmpeg ends cleanly |
-| `REFUSED` | The request broke the protocol | `AVERROR(EPROTO)`, and the channel is closed |
+| version | int16 | the version both sides worked out; a cross-check |
+| run | int64 | the parent's identifier for the run, echoed in `DONE` |
+| file size | int64 | bytes; reads stay within it |
+| block size | int32 | bytes, at most the largest body FFmpeg's side accepts |
+| longest `READ` | int32 | bytes, at least the block size and at most the largest body |
+| `READ`s in flight | int8 | 1 or more, at most what `CAPABILITY` said |
 
-The parent records every status other than `OK` and `EOF` as a failure of the run (Q4). It never
-answers `IO` for a disk that is only slow: slowness is a wait.
+The parent chooses the terms within what `CAPABILITY` allows. A parent that cannot work within
+them kills FFmpeg.
 
-### 4.7 The file's identity
+FFmpeg's side checks the terms and answers with its next message:
+- `ACCEPT`, then starts reading;
+- or `DECLINE` (§6.5), then exits.
 
-The open's answer carries the file's size and an opaque generation (the parent's choice: device,
-inode, size and modification time, hashed). The parent checks the file between reads. When it has
-changed, every later read is `CHANGED`. A film half-read from one file and half from its replacement
-can't pass as either.
+**The terms checked:**
+- the version matches its own reckoning;
+- the sizes are within its capability;
+- the file size is not negative.
 
-## 5. The wire format (draft)
+### 6.4 `READ` and `DATA`
 
-All integers little-endian. Each side writes whole frames and reads them whole, looping over short
-reads and writes and over `EINTR`. A malformed or unexpected frame closes the channel for good, on
-either side: there is no resynchronising.
+`READ` asks for a range of the file:
 
-### 5.1 Framing
+| Field | Type |
+| --- | --- |
+| offset | int64 |
+| length | int32 |
 
-Every frame starts with the same 16-byte header:
+**The rules a `READ` must follow:**
+- `length` is greater than 0 and at most the longest `READ`;
+- `offset + length` is at most the file size;
+- the outstanding `READ`s are within the agreed count.
 
-| Field | Bytes | Notes |
+The parent answers each `READ` with `DATA`, echoing its sequence. A `DATA` body is the requested
+bytes and nothing else, so its length is exactly the `READ`'s. Answers come in the order of their
+requests on a channel.
+
+**When the parent can't read** (the storage failed, or the file changed since `REQUEST`, which the
+parent checks by its own identity of the file), it does not answer. It kills FFmpeg. FFmpeg's side
+never hears of a read failure, because nothing it could do with a partial input is of use to the
+parent.
+
+### 6.5 `DECLINE`
+
+| Field | Type |
+| --- | --- |
+| reason length | int16, at most 1,024 |
+| reason | that many bytes, UTF-8 |
+
+### 6.6 `DONE`
+
+FFmpeg's verdict, like a `Result`. It is sent at FFmpeg's exit on every channel the run opened, and
+then FFmpeg exits.
+
+| Field | Type | Notes |
 | --- | --- | --- |
-| magic | 4 | `"FDPR"` |
-| type | 2 | §5.3 |
-| flags | 2 | 0 in version 1; a set bit not known is an error |
-| sequence | 4 | Requests count from 1 on each channel; an answer echoes its request's |
-| body length | 4 | The bytes after the header, at most the negotiated maximum |
+| run | int64 | echoes `REQUEST` |
+| result | int8 | 0 `OK`, 1 `ERR` |
+| *if `OK`:* bytes read | int64 | through this channel |
+| *if `ERR`:* kind | int8 | the table below |
+| *if `ERR`:* code | int32 | FFmpeg's error code (`AVERROR`), negated, since FFmpeg's codes are negative |
+| *if `ERR`:* message length | int16 | at most 1,024 |
+| *if `ERR`:* message | that many bytes | UTF-8, for the logs |
 
-### 5.2 Opening: HELLO
-
-FFmpeg's side writes `HELLO` as soon as the input is opened:
-- protocol versions it speaks, lowest and highest;
-- the largest frame it accepts;
-- what it wants to read (a short name it was given in the URL, at most 255 bytes, never a path).
-
-The parent answers `WELCOME`:
-- the version chosen;
-- its block size;
-- its largest answer;
-- requests in flight allowed;
-- the file's size;
-- its generation.
-
-Or it answers `REFUSED`, with a reason code. There is no further negotiation.
-
-### 5.3 Frame types
-
-| Type | From | Body |
+| Kind | Code | Means |
 | --- | --- | --- |
-| `HELLO` (1) | FFmpeg | versions, largest frame, name |
-| `WELCOME` (2) | parent | version, block, largest answer, in flight, size, generation |
-| `READ` (3) | FFmpeg | offset (8), length (4), hint (4): `NEEDED` or `PREFETCH` |
-| `DATA` (4) | parent | offset echoed (8), status (4), then 0 to length bytes |
-| `CLOSE` (5) | FFmpeg | nothing. The parent answers nothing, and the channel ends |
-| `REFUSED` (6) | either | reason (4) |
-| 7–15 | — | reserved: writing (§5.6), statistics, keep-alive |
+| `CHANNEL` | 1 | the channel to the parent ended (the parent died) |
+| `OPTIONS` | 2 | FFmpeg refused its command line before reading |
+| `MEDIA` | 3 | the content could not be demuxed, decoded or encoded |
+| `OUTPUT` | 4 | writing an output failed (for example, a full disk) |
+| `INTERRUPTED` | 5 | FFmpeg was asked to stop by its own means |
+| `INTERNAL` | 6 | anything else |
 
-### 5.4 Rules
+## 7. FFmpeg's side
 
-- **Lengths.** A `READ` asks for at most the negotiated largest answer. A `DATA` carries at most what
-  its `READ` asked, and only with status `OK`. A frame over the negotiated maximum is `REFUSED`.
-- **Offsets.** An offset is never negative. An offset past the end is answered `EOF`, not
-  `REFUSED`, because FFmpeg probes past the end legitimately.
-- **Sequence.** Answers come in the order of their requests on a channel. An answer whose sequence
-  or offset doesn't match the oldest request outstanding closes the channel.
-- **Prefetch.** A `PREFETCH` may be answered with `OK` and fewer bytes, or with zero bytes and `OK`,
-  meaning "not now". A `NEEDED` is never answered with zero bytes unless `EOF`.
-- **Seeking is local** to FFmpeg's side: it keeps the position, and `AVSEEK_SIZE` is the size from
-  `WELCOME`.
-- **One reader per channel.** FFmpeg's side holds a lock from writing a request to reading its
-  answer's last byte, though FFmpeg's I/O layer already calls one input from one thread at a time.
-- **No allocation from the peer's numbers.** Each side sizes its buffers from the negotiated maximum,
-  never from a length the other sent.
+**Patch 1: the protocol,** a URL protocol in libavformat.
 
-### 5.5 What the parent must validate
+1. **On open,** it does the opening exchange (§6.1–§6.3), and refuses to be opened twice on one
+   channel.
+2. **It reads in blocks.**
+   - It asks for whole blocks, aligned to the block size, the last block trimmed at the file's size.
+   - It keeps the last few blocks (4 in this patch) and answers FFmpeg's small reads from them.
+   - FFmpeg's I/O layer asks 32 KiB at a time, so this is what keeps the parent's reads large.
+3. **Seeking and end-of-file are local.** It keeps the position. The size comes from `REQUEST`, and
+   `AVSEEK_SIZE` answers it. A read at or past the end returns `AVERROR_EOF` without asking.
+4. **It prefetches when reading straight through.** When the block just needed follows the one needed
+   before it, it asks for the next block too, within the in-flight limit. A prefetched block that is
+   never used is read, kept until it falls out of the cache, and dropped.
+   - Measured on FFmpeg's own read traces: prefetching only when sequential keeps nearly all of
+     always-prefetching's gain. A read-through on a busy NAS took 12.1 s against 20.3 s.
+   - It never costs more than no prefetch: at most one wasted block per run, where always-prefetching
+     wasted up to three and slowed a probe by 40% ([bench/RESULTS.md](bench/RESULTS.md)).
+5. **It never times out.** While it waits, it polls every 100 ms and checks FFmpeg's interrupt
+   callback.
+   - **When FFmpeg is asked to stop by its own means,** the read returns `AVERROR_EXIT`, and the
+     channel is abandoned with a request outstanding: it sends only `DONE` after that.
+   - **When the channel ends** (end-of-file on its read side, or a broken pipe on its write side),
+     the read returns `AVERROR(EIO)`, and `DONE` will say `CHANNEL`.
+6. **It checks every answer:**
+   - the type and sequence expected;
+   - a `DATA` length equal to its `READ`'s;
+   - nothing longer than it accepts.
 
-The FFmpeg it serves may have been taken over by a crafted film. So the parent treats every frame as
-hostile:
-- the magic and the version;
-- the type expected now;
-- the flags, which must be zero;
-- the sequence;
-- a length within the maximum;
-- an offset that is not negative;
-- one `HELLO` per channel;
-- the requests in flight within the allowed count.
+   Any mismatch is the parent's bug: it fails the input and sends nothing more on that channel.
 
-Any violation ends the run. **It reads only the file it chose for that channel**: the name in `HELLO`
-is matched against what the parent itself said it would serve, and a name it didn't offer is
-`REFUSED`.
+**Patch 2: fftools,** small.
+- At FFmpeg's single exit point, it sends `DONE` on every channel the run opened.
+- It makes FFmpeg exit non-zero when an input failed, where FFmpeg today finishes its outputs and
+  exits 0.
+- ffprobe gets the same.
 
-### 5.6 Writing, later
+## 8. The parent's side
 
-Writing outputs (chunk stores, prepared copies) through the parent would give the parent the same
-control over writes. That matters if a prepared directory ever sits on a share. Version 1 reserves
-types for it and builds nothing.
+1. **It creates each input's pipes,** sets their buffers, and launches FFmpeg with the job and the
+   descriptors on its command line, confined.
+2. **It treats every frame from FFmpeg as hostile.** It checks:
+   - the type expected now;
+   - the sequence expected next;
+   - every integer for being negative;
+   - the length within the type's bounds and the 4,096-byte limit;
+   - `HELLO`'s exact length;
+   - each `READ` within the file, within the longest `READ`, and within the in-flight count.
 
-## 6. Performance (estimates, to measure)
+   **On any violation,** it logs exactly what was wrong and kills FFmpeg. It sends nothing. It never
+   allocates from a number FFmpeg sent, only from the terms it set.
+3. **A frame, once begun, must finish within a deadline** (1 second). A well-behaved FFmpeg sends
+   each frame in one atomic `write()`, so a partial frame that stays partial is a violation.
+   **Silence between frames is never a failure:** a paused or slow FFmpeg is quiet for as long as it
+   likes.
+4. **It serves each `READ` through its disk scheduler.** It releases its place on the disk as soon as
+   its read of the storage returns, before writing to the pipe, so an FFmpeg that is paused or slow to
+   drain never holds the disk. A read the storage hasn't answered keeps its place, and its own buffer,
+   until it returns, so a dead share pins at most one thread per place the disk has.
+5. **It owns all time.** It ends a run by killing FFmpeg:
+   - when it can't read;
+   - when the file changed;
+   - when a run is no longer wanted;
+   - when its own limits pass.
+6. **It knows a run has ended when the process exits,** never from end-of-file on a pipe.
+7. **It is the judge.** A run succeeded only if:
+   - FFmpeg exited 0;
+   - `DONE` said `OK` on every channel;
+   - the parent itself had no read failure;
+   - the `DONE`'s run matches.
 
-- **Round trips.** A request costs two system calls and two context switches on each side, on the
-  order of 10–30 µs. At 1 MiB blocks, 1 GB/s is 1,000 round trips a second, a few percent of a core.
-- **Copies.** Page cache to the parent's buffer, to the pipe, to FFmpeg's buffer is two copies more
-  than FFmpeg reading the file. The interposer's stand-in measured ~0.9 CPU-s per GB, in Python; Go
-  should do better. The parent can cut one copy with `splice` from file to pipe when it isn't sharing
-  the bytes.
-- **Latency.** Blocks and prefetch hide the round trip behind processing for sequential reads. A seek
-  pays one round trip, plus the disk.
-- **To measure before version 1 is fixed:**
-  - throughput and CPU per GB against direct reads, on a local disk and on NFS;
-  - a probe's time;
-  - a chunk run's time to its first output, with the disk idle and under background load;
-  - block sizes from 256 KiB to 4 MiB;
-  - one in flight against two.
+   Exiting without `DONE` is a failure: a crash, or a kill.
 
-## 7. Testing
+## 9. Performance
 
-- **A reference server** (in `test/`) that speaks the protocol and can be slow, dead, wrong, hostile,
-  or short at will. Every behaviour above is a test against it.
-- **Every run shape a media server uses**, read directly and through the protocol, compared byte for byte:
-  probe, read-through, subtitles, chunk copy, encode and sound, HLS, artwork. Encodes run at one
-  thread, since x264 with VBV differs between direct runs too.
-- **The hostile cases from the wargame:** two inputs, a reopening concat, huge reads, garbage
-  frames, a pipelining client, death of either side mid-frame, SIGSTOP mid-answer, a stop while a
-  read waits.
+Measured in [bench/](bench/RESULTS.md), on a file in the page cache, so the transport alone:
+
+| Transport | MB/s | CPU-s per GB |
+| --- | --- | --- |
+| FFmpeg reads the file itself | ~4,300 | 0.23 |
+| Pipe, 1 MiB buffer, copy | ~940 | 1.4 |
+| Pipe, 1 MiB buffer, `splice` | ~1,500–2,000 | 0.6–0.7 |
+| Shared memory (not chosen) | ~2,000 | 0.45 |
+
+Every row is faster than the disks the parent reads: a 1 Gb/s NAS gives about 110 MB/s, an NVMe drive
+2–3 GB/s. Shared memory was set aside: its gain (about 5 CPU-seconds on a 20 GB read-through) isn't
+worth its bookkeeping of who owns each block and its Linux-only path. A request costs a round trip of
+tens of microseconds, so a block of 1 MiB keeps it negligible.
+
+**Still to measure:**
+- on a real NAS, with real competing load;
+- a chunk run's time to its first output;
+- block sizes from 256 KiB to 4 MiB;
+- one `READ` in flight against two.
+
+## 10. Testing
+
+- **A reference parent** (in `test/`) that speaks the protocol and can be slow, silent, wrong, or
+  short, and kill at any point.
+- **The protocol's own suite:** every rule in §4–§8, from both sides; partial frames; two frames in
+  one read; a wrapping sequence; every violation the parent must catch.
+- **Every run shape a media server uses,** read directly and through the protocol, compared byte for byte:
+  - probe;
+  - read-through;
+  - subtitles;
+  - chunk copy, encode and sound;
+  - HLS;
+  - artwork.
+
+  Encodes run at one thread, since an x264 encode with VBV differs between direct runs too.
+- **Hostile cases:**
+  - two inputs;
+  - a reopening concat;
+  - huge, negative and out-of-range fields;
+  - a pipelining FFmpeg;
+  - half frames;
+  - death of either side mid-frame;
+  - SIGSTOP mid-answer.
 - **Confined:** under Landlock with no media file granted, and seccomp refusing sockets.
-- **On every jellyfin-ffmpeg release the patches move to:** the whole suite, on amd64 and arm64.
+- **At every jellyfin-ffmpeg release** the patches move to: the whole suite, on amd64 and arm64.
 
-## 8. For discussion
+## 11. Not in version 1
 
-1. **The name** (§3).
-2. **The transport** (§4.1): pipes, a socketpair handed down, or shared memory. R: pipes.
-3. **Requests in flight** (§4.4): one, or two with prefetch. R: negotiated; start with one and
-   measure.
-4. **Whether a stop should end FFmpeg cleanly** (§4.5), which means the protocol polls its interrupt
-   callback every 100 ms while waiting. R: yes.
-5. **The fftools patch** (§3), exiting non-zero when an input failed. R: yes, as defence in depth.
-6. **Writing** (§5.6): reserve it and build nothing in version 1? R: yes.
-7. **Anything the protocol should carry that it doesn't:**
-   - a keep-alive (R: no, because the parent owns time);
-   - statistics (R: later);
-   - a way for FFmpeg's side to say its read is for a seek, so the parent can put it first (R:
-     worth discussing, since the parent can also tell a seek from an offset that jumps).
+- **Writing outputs through the parent.** Outputs belong on fast local disk, which FFmpeg writes
+  itself.
+- **Shared memory** for the bytes.
+- **A stop or abort message.** The parent kills.
+- **Read errors sent to FFmpeg.** The parent kills.
+- **A magic number.** The parent creates the channel and names its descriptors itself, so nothing
+  else is ever on the other end.
+
+## 12. Still open
+
+1. **The name** (`NAME` above). Something generic, such as `fdpair:`, suits offering it upstream.
+2. **Whether `DONE`'s `OK` carries more than the bytes read,** for cross-checking: for example,
+   packets demuxed or frames written.
+3. **Whether `READ`s must be block-aligned.** Draft 2 has FFmpeg's side ask in aligned blocks, but the
+   parent doesn't yet refuse an unaligned one. Making it a rule makes violations plainer. It also
+   makes a later change to how FFmpeg's side reads a protocol change.
