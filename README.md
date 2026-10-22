@@ -1,14 +1,17 @@
 # ffmpeg-ffstreamer
 
-Patches on top of [jellyfin-ffmpeg](https://github.com/jellyfin/jellyfin-ffmpeg) that let a parent
-process serve every read FFmpeg makes of its input, by byte offset, over descriptors it hands down:
-no socket, no path to the media file, and every read the parent's to schedule, pace, share, or
-refuse.
+A new way to feed data into FFmpeg in a security-constrained environment. These patches on top of
+[jellyfin-ffmpeg](https://github.com/jellyfin/jellyfin-ffmpeg) add `ffstreamer`, a protocol over
+which a parent process serves every read FFmpeg makes of its input, by byte offset, over two pipes
+it hands down.
 
-It exists for a media server's node. When a film sits on a
-network share that goes away, an FFmpeg reading the file itself waits in the kernel and cannot be
-killed. When FFmpeg reads through the node instead, the node knows, decides, and can always end the
-run. The protocol is general, and nothing in the patches knows its parent.
+FFmpeg confined by a sandbox (Landlock, seccomp, or a container) can then read its input with no
+path to the file, no socket, and no other way to reach the storage: the parent decides every read,
+and can schedule, pace, share or refuse it. Storage that stops answering, such as a network share
+that has gone away, holds a thread of the parent, which notices and can always end the run, never
+FFmpeg waiting in the kernel where it cannot be killed. Each side checks every frame the other
+sends, so an FFmpeg taken over by a crafted input can only ask for ranges of the one file it was
+given.
 
 **Status:** implementing. The protocol is [PROTOCOL.md](PROTOCOL.md), draft 6, ready to implement after
 five audits ([audits/](audits/)). The patches are written:
