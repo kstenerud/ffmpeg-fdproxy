@@ -128,19 +128,20 @@ static int claimed_count;
 static int claim_channel(int read_fd)
 {
     int ret = 0;
+
     ff_mutex_lock(&claims_lock);
     for (int i = 0; i < claimed_count; i++) {
         if (claimed_read_fds[i] == read_fd) {
             ret = AVERROR(EBUSY);
-            break;
+            goto end;
         }
     }
-    if (!ret) {
-        if (claimed_count == FFS_MAX_CLAIMS)
-            ret = AVERROR(EMFILE);
-        else
-            claimed_read_fds[claimed_count++] = read_fd;
+    if (claimed_count == FFS_MAX_CLAIMS) {
+        ret = AVERROR(EMFILE);
+        goto end;
     }
+    claimed_read_fds[claimed_count++] = read_fd;
+end:
     ff_mutex_unlock(&claims_lock);
     return ret;
 }
@@ -163,8 +164,10 @@ static int write_frame_locked(FFStreamerContext *c, uint8_t type,
     int was_pending, ret = 0;
     ssize_t written;
 
-    if (body_length < 0 || body_length > FFS_MAX_SENT_FRAME - FFS_HEADER_BYTES)
-        return AVERROR(EINVAL);
+    if (body_length < 0 || body_length > FFS_MAX_SENT_FRAME - FFS_HEADER_BYTES) {
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
 
     frame[0] = type;
     frame[1] = (uint8_t)c->next_sequence;
@@ -189,17 +192,19 @@ static int write_frame_locked(FFStreamerContext *c, uint8_t type,
             struct timespec zero = { 0, 0 };
             sigtimedwait(&pipe_set, NULL, &zero);
         }
-    } else if (written != FFS_HEADER_BYTES + body_length) {
+        goto restore_mask;
+    }
+    if (written != FFS_HEADER_BYTES + body_length) {
         /* A pipe takes a frame this small whole or not at all. */
         ret = AVERROR(EIO);
+        goto restore_mask;
     }
+    if (sequence_out)
+        *sequence_out = c->next_sequence;
+    c->next_sequence = next_sequence(c->next_sequence);
+restore_mask:
     pthread_sigmask(SIG_SETMASK, &old_set, NULL);
-
-    if (!ret) {
-        if (sequence_out)
-            *sequence_out = c->next_sequence;
-        c->next_sequence = next_sequence(c->next_sequence);
-    }
+end:
     return ret;
 }
 
@@ -207,6 +212,7 @@ static int write_frame(FFStreamerContext *c, uint8_t type, const uint8_t *body,
                        int32_t body_length, int8_t *sequence_out)
 {
     int ret;
+
     ff_mutex_lock(&c->lock);
     ret = write_frame_locked(c, type, body, body_length, sequence_out);
     ff_mutex_unlock(&c->lock);
@@ -221,37 +227,42 @@ static int read_exact(URLContext *h, uint8_t *buffer, int64_t length)
 {
     FFStreamerContext *c = h->priv_data;
     int64_t got = 0;
+    int ret = 0;
 
     while (got < length) {
         struct pollfd waiting = { .fd = c->read_fd, .events = POLLIN };
         int ready = poll(&waiting, 1, FFS_WAIT_SLICE_MS);
-        if (ready < 0) {
-            if (errno == EINTR) {
-                if (ff_check_interrupt(&h->interrupt_callback))
-                    return AVERROR_EXIT;
-                continue;
-            }
-            return AVERROR(errno);
+        size_t want;
+        ssize_t n;
+
+        if (ready < 0 && errno != EINTR) {
+            ret = AVERROR(errno);
+            goto end;
         }
-        if (ready == 0) {
-            if (ff_check_interrupt(&h->interrupt_callback))
-                return AVERROR_EXIT;
+        if (ready <= 0) {
+            /* A slice passed, or a signal came: see whether FFmpeg wants to stop. */
+            if (ff_check_interrupt(&h->interrupt_callback)) {
+                ret = AVERROR_EXIT;
+                goto end;
+            }
             continue;
         }
-        {
-            size_t want = (size_t)FFMIN(length - got, INT_MAX);
-            ssize_t n = read(c->read_fd, buffer + got, want);
-            if (n < 0) {
-                if (errno == EINTR || errno == EAGAIN)
-                    continue;
-                return AVERROR(errno);
-            }
-            if (n == 0)
-                return AVERROR_EOF;
-            got += n;
+        want = (size_t)FFMIN(length - got, INT_MAX);
+        n = read(c->read_fd, buffer + got, want);
+        if (n < 0) {
+            if (errno == EINTR || errno == EAGAIN)
+                continue;
+            ret = AVERROR(errno);
+            goto end;
         }
+        if (n == 0) {
+            ret = AVERROR_EOF;
+            goto end;
+        }
+        got += n;
     }
-    return 0;
+end:
+    return ret;
 }
 
 /* Reads a header and checks its type, sequence and exact or bounded length. */
@@ -260,9 +271,10 @@ static int read_header(URLContext *h, uint8_t expected_type, int8_t expected_seq
 {
     uint8_t header[FFS_HEADER_BYTES];
     int32_t length;
-    int ret = read_exact(h, header, FFS_HEADER_BYTES);
-    if (ret < 0)
-        return ret;
+    int ret;
+
+    if ((ret = read_exact(h, header, FFS_HEADER_BYTES)) < 0)
+        goto end;
     length = (int32_t)AV_RL32(header + 2);
     if (header[0] != expected_type || (int8_t)header[1] != expected_sequence ||
         (int8_t)header[1] < 0 || length < 0 ||
@@ -270,11 +282,13 @@ static int read_header(URLContext *h, uint8_t expected_type, int8_t expected_seq
         av_log(h, AV_LOG_ERROR, "ffstreamer: the parent sent type %d, number %d, length %d; "
                "expected type %d, number %d, length %d\n", header[0], (int8_t)header[1],
                length, expected_type, expected_sequence, expected_length);
-        return AVERROR(EPROTO);
+        ret = AVERROR(EPROTO);
+        goto end;
     }
     if (length_out)
         *length_out = length;
-    return 0;
+end:
+    return ret;
 }
 
 /* --- Faults and DONE ------------------------------------------------------- */
@@ -337,19 +351,23 @@ static void send_done(URLContext *h, int kind, int error)
 static int check_descriptor(URLContext *h, int fd, int access_mode)
 {
     struct stat facts;
-    int flags;
+    int flags, ret = 0;
+
     if (fstat(fd, &facts) < 0 || !S_ISFIFO(facts.st_mode)) {
         av_log(h, AV_LOG_ERROR, "ffstreamer: descriptor %d is not a pipe\n", fd);
-        return AVERROR(EBADF);
+        ret = AVERROR(EBADF);
+        goto end;
     }
     flags = fcntl(fd, F_GETFL);
     if (flags < 0 || (flags & O_ACCMODE) != access_mode) {
         av_log(h, AV_LOG_ERROR, "ffstreamer: descriptor %d is not open for its direction\n", fd);
-        return AVERROR(EBADF);
+        ret = AVERROR(EBADF);
+        goto end;
     }
     if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0)
-        return AVERROR(errno);
-    return 0;
+        ret = AVERROR(errno);
+end:
+    return ret;
 }
 
 static int exchange_hellos(URLContext *h)
@@ -362,20 +380,23 @@ static int exchange_hellos(URLContext *h)
     AV_WL16(body, FFS_VERSION_LOWEST);
     AV_WL16(body + 2, FFS_VERSION_HIGHEST);
     if ((ret = write_frame(c, FFS_HELLO, body, 4, NULL)) < 0)
-        return ret;
+        goto end;
     if ((ret = read_header(h, FFS_HELLO, 0, 4, NULL)) < 0)
-        return ret;
+        goto end;
     if ((ret = read_exact(h, body, 4)) < 0)
-        return ret;
+        goto end;
     lowest = (int16_t)AV_RL16(body);
     highest = (int16_t)AV_RL16(body + 2);
     if (lowest < 1 || highest < lowest ||
         FFMIN(highest, FFS_VERSION_HIGHEST) < FFMAX(lowest, FFS_VERSION_LOWEST)) {
         av_log(h, AV_LOG_ERROR, "ffstreamer: the parent speaks versions %d to %d, this side %d to %d\n",
                lowest, highest, FFS_VERSION_LOWEST, FFS_VERSION_HIGHEST);
-        return AVERROR(EPROTO);
+        ret = AVERROR(EPROTO);
+        goto end;
     }
-    return FFMIN(highest, FFS_VERSION_HIGHEST);
+    ret = FFMIN(highest, FFS_VERSION_HIGHEST);
+end:
+    return ret;
 }
 
 /* Returns 0 for good terms, a negative AVERROR for a malformed REQUEST (no DONE),
@@ -388,9 +409,9 @@ static int receive_request(URLContext *h, int version, int8_t capability_sequenc
     int ret;
 
     if ((ret = read_header(h, FFS_REQUEST, capability_sequence, 27, NULL)) < 0)
-        return ret;
+        goto end;
     if ((ret = read_exact(h, body, 27)) < 0)
-        return ret;
+        goto end;
 
     request_version         = (int16_t)AV_RL16(body);
     c->run                  = (int64_t)AV_RL64(body + 2);
@@ -402,16 +423,20 @@ static int receive_request(URLContext *h, int version, int8_t capability_sequenc
     if (request_version < 0 || c->run < 0 || c->size < 0 || c->block < 0 ||
         c->longest < 0 || c->outstanding_allowed < 0) {
         av_log(h, AV_LOG_ERROR, "ffstreamer: REQUEST has a negative field\n");
-        return AVERROR(EPROTO);
+        ret = AVERROR(EPROTO);
+        goto end;
     }
     if (request_version != version || c->run < 1 ||
         c->block < 1 || c->block > FFS_LARGEST_BODY ||
         c->longest < c->block || c->longest > FFS_LARGEST_BODY ||
         c->outstanding_allowed < 1 || c->outstanding_allowed > FFS_OUTSTANDING_CAP) {
         av_log(h, AV_LOG_ERROR, "ffstreamer: REQUEST's terms are outside what this side offered\n");
-        return 1;
+        ret = 1;
+        goto end;
     }
-    return 0;
+    ret = 0;
+end:
+    return ret;
 }
 
 static void close_descriptors(FFStreamerContext *c)
@@ -439,20 +464,24 @@ static int ffstreamer_open(URLContext *h, const char *url, int flags)
     int8_t capability_sequence;
     int version, ret;
 
+    /* Until the channel is claimed, its descriptors are not ours to close. */
     if (strcmp(url, "ffstreamer:")) {
         av_log(h, AV_LOG_ERROR, "ffstreamer: the URL must be exactly \"ffstreamer:\"\n");
-        return AVERROR(EINVAL);
+        ret = AVERROR(EINVAL);
+        goto unclaimed;
     }
-    if (flags & AVIO_FLAG_WRITE)
-        return AVERROR(EINVAL);
+    if (flags & AVIO_FLAG_WRITE) {
+        ret = AVERROR(EINVAL);
+        goto unclaimed;
+    }
     if (c->read_fd < 0 || c->write_fd < 0) {
         av_log(h, AV_LOG_ERROR, "ffstreamer: -ffstreamer_read_fd and -ffstreamer_write_fd are required\n");
-        return AVERROR(EINVAL);
+        ret = AVERROR(EINVAL);
+        goto unclaimed;
     }
     if ((ret = claim_channel(c->read_fd)) < 0) {
         av_log(h, AV_LOG_ERROR, "ffstreamer: the channel on descriptor %d was opened before\n", c->read_fd);
-        c->read_fd = c->write_fd = -1;  /* not ours to close */
-        return ret;
+        goto unclaimed;
     }
     if ((ret = check_descriptor(h, c->read_fd, O_RDONLY)) < 0 ||
         (ret = check_descriptor(h, c->write_fd, O_WRONLY)) < 0)
@@ -494,7 +523,8 @@ static int ffstreamer_open(URLContext *h, const char *url, int flags)
 
     c->accepted = 1;
     h->is_streamed = 0;
-    return 0;
+    ret = 0;
+    goto end;
 
 out_of_memory:
     send_done(h, FFS_KIND_TERMS, AVERROR(ENOMEM));
@@ -505,6 +535,10 @@ fail:
     /* FFmpeg never calls the close of an open that failed. */
     free_cache(c);
     close_descriptors(c);
+    goto end;
+unclaimed:
+    c->read_fd = c->write_fd = -1;
+end:
     return ret;
 }
 
@@ -548,12 +582,16 @@ static int send_read(URLContext *h, int64_t index)
     int32_t length = block_length(c, index);
     int8_t sequence;
 
-    if (slot < 0)
-        return AVERROR_BUG;     /* the cache is larger than what may be outstanding */
+    if (slot < 0) {
+        ret = AVERROR_BUG;      /* the cache is larger than what may be outstanding */
+        goto end;
+    }
     AV_WL64(body, (uint64_t)(index * c->block));
     AV_WL32(body + 8, (uint32_t)length);
-    if ((ret = write_frame(c, FFS_READ, body, 12, &sequence)) < 0)
-        return set_fault(c, ret);
+    if ((ret = write_frame(c, FFS_READ, body, 12, &sequence)) < 0) {
+        ret = set_fault(c, ret);
+        goto end;
+    }
 
     c->blocks[slot].index = index;
     c->blocks[slot].length = length;
@@ -564,7 +602,8 @@ static int send_read(URLContext *h, int64_t index)
     entry->length = length;
     entry->slot = slot;
     c->outstanding_count++;
-    return 0;
+end:
+    return ret;
 }
 
 /* Takes the answer to the oldest outstanding READ into its block. */
@@ -575,15 +614,20 @@ static int receive_data(URLContext *h)
     int ret;
 
     if ((ret = read_header(h, FFS_DATA, oldest->sequence, oldest->length, NULL)) < 0)
-        return set_fault(c, ret);
+        goto fault;
     /* The slot is freed no earlier than reading the DATA header (PROTOCOL.md §7.4). */
     c->outstanding_first = (c->outstanding_first + 1) % FFS_MAX_OUTSTANDING;
     c->outstanding_count--;
     if ((ret = read_exact(h, c->blocks[oldest->slot].data, oldest->length)) < 0)
-        return set_fault(c, ret);
+        goto fault;
     c->blocks[oldest->slot].pending = 0;
     c->blocks[oldest->slot].last_used = ++c->use_clock;
-    return 0;
+    ret = 0;
+    goto end;
+fault:
+    ret = set_fault(c, ret);
+end:
+    return ret;
 }
 
 static int is_outstanding(FFStreamerContext *c, int64_t index)
@@ -597,15 +641,21 @@ static int is_outstanding(FFStreamerContext *c, int64_t index)
 static int ffstreamer_read(URLContext *h, unsigned char *buf, int size)
 {
     FFStreamerContext *c = h->priv_data;
-    int64_t index, blocks_in_file;
-    int slot, ret, n;
+    int64_t index, blocks_in_file, within;
+    int slot, ret;
 
-    if (c->fault)
-        return c->fault;
-    if (c->done_sent)
-        return AVERROR(EIO);
-    if (c->position >= c->size)
-        return AVERROR_EOF;
+    if (c->fault) {
+        ret = c->fault;
+        goto end;
+    }
+    if (c->done_sent) {
+        ret = AVERROR(EIO);
+        goto end;
+    }
+    if (c->position >= c->size) {
+        ret = AVERROR_EOF;
+        goto end;
+    }
 
     index = c->position / c->block;
     blocks_in_file = (c->size + c->block - 1) / c->block;
@@ -613,9 +663,9 @@ static int ffstreamer_read(URLContext *h, unsigned char *buf, int size)
     if ((slot = find_block(c, index)) < 0) {
         while (c->outstanding_count >= c->outstanding_allowed)
             if ((ret = receive_data(h)) < 0)
-                return ret;
+                goto end;
         if ((slot = find_block(c, index)) < 0 && (ret = send_read(h, index)) < 0)
-            return ret;
+            goto end;
     }
 
     /* The block about to be read is the most recently used, so a prefetch never evicts it. */
@@ -627,22 +677,21 @@ static int ffstreamer_read(URLContext *h, unsigned char *buf, int size)
         find_block(c, index + 1) < 0 && !is_outstanding(c, index + 1) &&
         c->outstanding_count < c->outstanding_allowed && free_slot(c) >= 0) {
         if ((ret = send_read(h, index + 1)) < 0)
-            return ret;
+            goto end;
     }
 
     while ((slot = find_block(c, index)) < 0 || c->blocks[slot].pending)
         if ((ret = receive_data(h)) < 0)
-            return ret;
+            goto end;
 
     c->last_needed = index;
     c->blocks[slot].last_used = ++c->use_clock;
-    {
-        int64_t within = c->position - index * c->block;
-        n = (int)FFMIN((int64_t)size, c->blocks[slot].length - within);
-        memcpy(buf, c->blocks[slot].data + within, n);
-    }
-    c->position += n;
-    return n;
+    within = c->position - index * c->block;
+    ret = (int)FFMIN((int64_t)size, c->blocks[slot].length - within);
+    memcpy(buf, c->blocks[slot].data + within, ret);
+    c->position += ret;
+end:
+    return ret;
 }
 
 static int64_t ffstreamer_seek(URLContext *h, int64_t position, int whence)
@@ -651,15 +700,18 @@ static int64_t ffstreamer_seek(URLContext *h, int64_t position, int whence)
     int64_t target;
 
     switch (whence) {
-    case AVSEEK_SIZE: return c->size;
+    case AVSEEK_SIZE: target = c->size; goto end;
     case SEEK_SET:    target = position; break;
     case SEEK_CUR:    target = c->position + position; break;
     case SEEK_END:    target = c->size + position; break;
-    default:          return AVERROR(EINVAL);
+    default:          target = AVERROR(EINVAL); goto end;
     }
-    if (target < 0)
-        return AVERROR(EINVAL);
+    if (target < 0) {
+        target = AVERROR(EINVAL);
+        goto end;
+    }
     c->position = target;
+end:
     return target;
 }
 
@@ -694,11 +746,14 @@ static int ffstreamer_init(URLContext *h, const char *url, int flags)
 {
     FFStreamerContext *c = h->priv_data;
     int ret;
-    if ((ret = ff_mutex_init(&c->lock, NULL)))
-        return AVERROR(ret);
-    ret = ffstreamer_open(h, url, flags);
-    if (ret < 0)
+
+    if ((ret = ff_mutex_init(&c->lock, NULL))) {
+        ret = AVERROR(ret);
+        goto end;
+    }
+    if ((ret = ffstreamer_open(h, url, flags)) < 0)
         ff_mutex_destroy(&c->lock);
+end:
     return ret;
 }
 
