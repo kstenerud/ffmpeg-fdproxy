@@ -115,7 +115,10 @@ class Parent:
 
     # --- the opening exchange --------------------------------------------------
     def opening(self):
-        kind, sequence, body = self.next_frame()
+        got = self.next_frame()
+        if got is None:
+            return  # the child ended before its HELLO: no terms, no DONE
+        kind, sequence, body = got
         if kind != HELLO:
             raise Violation(f"the first frame was type {kind}")
         lowest, highest = struct.unpack("<hh", body)
@@ -124,7 +127,10 @@ class Parent:
             raise Violation(f"no shared version: the child {lowest}-{highest}, the parent {mine[0]}-{mine[1]}")
         version = min(highest, mine[1])
         self.write(self.frame(HELLO, 0, struct.pack("<hh", *mine)))
-        kind, sequence, body = self.next_frame()
+        got = self.next_frame()
+        if got is None:
+            return
+        kind, sequence, body = got
         if kind != CAPABILITY:
             raise Violation(f"type {kind} where CAPABILITY was expected")
         preferred, largest, outstanding = struct.unpack("<iib", body)

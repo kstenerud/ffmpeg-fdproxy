@@ -32,6 +32,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "libavutil/avstring.h"
 #include "libavutil/error.h"
 #include "libavutil/intreadwrite.h"
 #include "libavutil/mem.h"
@@ -319,7 +320,7 @@ static void send_done(URLContext *h, int kind, int error)
         int32_t code = (error < 0 && error != INT_MIN) ? -error : 0;
         size_t message_length;
         av_strerror(error, message, sizeof(message));
-        message_length = strnlen(message, FFS_MESSAGE_MAX);
+        message_length = av_strnlen(message, FFS_MESSAGE_MAX);
         body[8] = 1;
         body[9] = (uint8_t)kind;
         AV_WL32(body + 10, (uint32_t)code);
