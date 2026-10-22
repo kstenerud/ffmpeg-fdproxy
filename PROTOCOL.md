@@ -1,31 +1,29 @@
-# ffstreamer, the read protocol: draft 4
+# ffstreamer, the read protocol: draft 5
 
-**Status:** draft 4, 2026-10-22. It takes in two independent audits of draft 3, both accepted by the
-owner with the agent's recommendations:
-- [the wire protocol and Unix IPC](audits/2026-10-22-draft-3-protocol.md);
-- [FFmpeg's internals](audits/2026-10-22-draft-3-ffmpeg-internals.md).
+**Status:** draft 5, 2026-10-22. It takes in the third audit round
+([audits/2026-10-22-draft-4-combined.md](audits/2026-10-22-draft-4-combined.md)), accepted by the
+owner with the agent's recommendations. That audit judged a review of these changes enough, with no
+further full round. §14 lists what is still open.
 
-It goes to a further audit next. No patch is written until it has survived. §14 lists what is still
-open.
-
-**What changed since draft 3:**
-- **`DONE` is sent from the protocol's close, exactly once per channel.** No registry and no exported
-  function. Its kinds are only those the protocol knows; the exit status is the run's verdict.
-- **The fftools patch promotes the input's recorded read error to the exit status,** in the three
-  places where ffmpeg and ffprobe now exit 0 after an input failed.
-- **The in-flight rule is fixed:** the parent stops counting a `READ` when it takes it to write, and
-  FFmpeg's side frees a slot no earlier than a `DATA` header.
-- **One writer and one buffer reserve per channel,** and the no-deadlock argument now covers several
-  inputs.
-- **The exit sequence is fixed.**
-- **Descriptors are close-on-exec from creation.**
-- **The real pipe-size fallback (8 KiB), and a pipe budget.**
-- **A storage-read deadline.**
-- **No processes outlive FFmpeg:** seccomp denies `fork` and `setsid`.
-- **The interrupt check is back,** as protection rather than as a stop.
-- **Runs that read through ffstreamer are paused by not answering, not by SIGSTOP.**
-- **The bytes-served budget is per kind of run, with a floor.**
-- **FFmpeg's real thread model and return conventions,** and the build into jellyfin-ffmpeg.
+**What changed since draft 4:**
+- **`DONE(TERMS)` is sent from the open,** since FFmpeg never calls the close of an open that failed.
+  Every other `DONE` comes from the close.
+- **An interrupt is `DONE`'s kind `INTERRUPTED`.** The fftools patch never lets an interrupt become
+  exit 0, and a stop the parent caused is judged a stop whatever the exit code.
+- **The seccomp filter is written out,** per architecture: `clone3` answers "not implemented" so glibc
+  falls back to a `clone` the filter can read. Denying `clone3` outright broke FFmpeg's threads.
+  `setpgid` is denied too.
+- **The parent kills the process itself, by pidfd,** not its process group, which a hostile FFmpeg
+  could leave.
+- **The block cache's size is an option the parent sets** from the streams a run reads. 8 blocks
+  read a 10-track non-interleaved MP4 400 times over.
+- **Pausing holds `READ`s and stops the process (SIGSTOP),** so a paused run uses neither disk nor
+  processor.
+- **The inherited descriptors are contiguous.**
+- **The budget's figures are corrected.**
+- **Stops are separated from failures.**
+- **`run` is at least 1.**
+- **The reserve is (outstanding + 1) × longest `READ`.**
 
 ## 1. What it is for
 
@@ -59,9 +57,11 @@ input, by offset. Then:
 | Ends a run | by killing FFmpeg, at any time, for any reason | by exiting |
 
 There is no message to stop, abort, pause or report a read error.
-- **The parent pauses a run by not answering its `READ`s.** The run waits, using nothing. SIGSTOP is
-  not needed for runs that read through ffstreamer.
-- **The parent stops a run by killing it** (§9.8).
+- **The parent pauses a run by holding its `READ`s and stopping the process** (SIGSTOP), and resumes
+  it with SIGCONT. Holding the reads stops its disk use. Stopping the process stops it using the
+  processor on what it already holds (a paused run uses neither). Holding a `READ` trips no
+  timeout inside FFmpeg: a 45-second hold mid-run finished normally (the third audit).
+- **The parent stops a run by killing it,** the process itself, by pidfd (§9.8).
 
 **FFmpeg's exit status is the run's verdict.** `DONE` is FFmpeg's account of each channel: advisory,
 and not a trust boundary. A compromised FFmpeg can lie in it, as it can in its outputs.
@@ -86,7 +86,10 @@ and not a trust boundary. A compromised FFmpeg can lie in it, as it can in its o
   - `read_fd` is where FFmpeg reads the parent's messages, and `write_fd` where it writes its own.
   - The whitelist reaches nested opens. A crafted manifest naming `pipe:5` or `fd:` cannot read the
     channel's descriptor directly (checked against FFmpeg's source and reproduced).
-  - The options are decoding options, and both default to -1. An open with either left at -1 fails.
+  - The options are decoding options. The two descriptors default to -1, and an open with either left
+    at -1 fails.
+  - `-ffstreamer_cache_blocks N` sets how many blocks FFmpeg's side keeps (§10.2), from 2 to 64, default
+    8. The parent sets it from the streams the run reads.
   - The URL must be exactly `ffstreamer:`, with nothing after it, so a relative reference resolved
     against it cannot open.
 
@@ -96,9 +99,12 @@ and not a trust boundary. A compromised FFmpeg can lie in it, as it can in its o
 - creates every pipe end close-on-exec, atomically (`pipe2(O_CLOEXEC)`);
 - hands each child only its own ends, by `dup2` at exec. No other run, launched at any moment, ever
   inherits them;
-- numbers the channel's descriptors below any descriptor FFmpeg opens during its option parsing (in
-  a parent that reads FFmpeg's -progress, that pipe). That way a duplicate FFmpeg makes of its own descriptor can never land
-  on a channel's number.
+- hands FFmpeg its inherited descriptors **contiguous, with no gap** (in Go, `ExtraFiles` with no nil
+  entry). A missing descriptor would otherwise be filled by the first descriptor FFmpeg opens or
+  duplicates itself, which takes the lowest free number: measured, `dup(6)` returned 4. Ordering
+  alone can't prevent that, so the `HELLO` round trip is what proves the channel;
+- closes its own copies of FFmpeg's ends of the pipes right after FFmpeg starts. Its request reader
+  then simply reaches end-of-file once FFmpeg has exited (§9.9).
 
 **FFmpeg's side, on open:**
 - sets `FD_CLOEXEC` on both descriptors;
@@ -215,7 +221,7 @@ The parent's terms for this input. It echoes `CAPABILITY`'s number.
 | Field | Type | Rule |
 | --- | --- | --- |
 | version | int16 | the version both sides worked out; a cross-check |
-| run | int64 | ≥ 0; the parent's identifier for the run, echoed in `DONE` |
+| run | int64 | ≥ 1; the parent's identifier for the run, echoed in `DONE` |
 | file size | int64 | ≥ 0 |
 | block size | int32 | > 0, and ≤ the largest body `CAPABILITY` gave |
 | longest `READ` | int32 | ≥ the block size, and ≤ the largest body |
@@ -226,8 +232,8 @@ The parent's terms for this input. It echoes `CAPABILITY`'s number.
 **FFmpeg's side:**
 - **A malformed `REQUEST`:** the wrong type, number or length, or a negative field. That is a protocol
   fault before the terms exist. The open fails, and no `DONE` is sent.
-- **A well-formed `REQUEST` whose values break the rules:** it sends `DONE` (`ERR`, `TERMS`), and the
-  open fails. The `DONE` echoes the run when the run field is valid, and 0 otherwise.
+- **A well-formed `REQUEST` whose values break the rules:** it sends `DONE` (`ERR`, `TERMS`) from the
+  open, and the open fails. The `DONE` echoes the run when it is at least 1, and 0 otherwise.
 - **A good `REQUEST`:** its first `READ` accepts the terms.
 
 ### 7.4 `READ` and `DATA`
@@ -281,17 +287,21 @@ FFmpeg's account of one channel, like a `Result`.
 | `TERMS` | 1 | FFmpeg's side declined `REQUEST`'s terms |
 | `CHANNEL` | 2 | the channel to the parent ended (end-of-file, or a broken pipe): the parent died |
 | `PROTOCOL` | 3 | the parent broke the protocol: a wrong type, number or length |
+| `INTERRUPTED` | 4 | FFmpeg's interrupt callback fired while the channel waited (a signal, or its own `q`) |
 
 `OK` means this channel saw no fault. Whether the run as a whole succeeded is FFmpeg's exit status.
 fftools carries one merged error with no record of where it came from, so `DONE` can't classify a
 failure of decoding or writing (§10.4).
 
 **When it is sent:**
-- **Exactly once per channel,** from the protocol's close, on a channel that received a well-formed
-  `REQUEST`. A `TERMS` refusal is that once.
+- **Exactly once per channel that received a well-formed `REQUEST`:**
+  - from the open, for a `TERMS` refusal. FFmpeg never calls the close of an open that failed
+    (`ffurl_connect` sets `is_connected` only on success);
+  - from the close, otherwise.
 - **Never before a well-formed `REQUEST`.** If the opening exchange fails, the open fails, FFmpeg
   exits non-zero, and the missing `DONE` already says so.
-- **After a fault on the channel** (`CHANNEL`, `PROTOCOL`), `DONE` is the only message sent.
+- **After a fault on the channel** (`CHANNEL`, `PROTOCOL`, `INTERRUPTED`), `DONE` is the only message
+  sent, as `ERR` with the fault's kind.
 - **A path that skips the close** (an `exit()` mid-run, a signal, a crash) sends no `DONE`. Each of
   those also exits non-zero or is killed.
 
@@ -322,14 +332,28 @@ number the other side sent. It allocates only from the terms it set or accepted.
 
 1. **It launches FFmpeg confined,** in its own process group, with the job, the whitelist and the
    descriptors on its command line, and its descriptors as in §4.2.
-   - **No process outlives FFmpeg:** its seccomp filter denies `fork`, `vfork`, `clone` without
-     `CLONE_THREAD`, and `setsid`. FFmpeg starts no processes, and its threads still work.
-   - Without the denial, a taken-over FFmpeg could start a child in a session of its own, which would
-     escape the group kill and hold the channel open.
+   - **No process outlives or escapes FFmpeg.** Its seccomp filter, beside today's denials:
+
+     | System call | Answer | Why |
+     | --- | --- | --- |
+     | `clone3` | `ENOSYS` | seccomp can't read `clone3`'s flags. glibc 2.34+ calls it first, and falls back to `clone` only on `ENOSYS`. `EPERM` here broke FFmpeg's threads (measured: exit 255) |
+     | `clone` without `CLONE_THREAD` in its flags (`args[0]`) | `EPERM` | creating a process; threads pass |
+     | `fork`, `vfork` (amd64; arm64 has neither) | `EPERM` | creating a process |
+     | `setsid`, `setpgid` | `EPERM` | leaving its session or process group |
+
+     The filter differs by architecture, keeps today's refusal of other architectures (x32 on amd64),
+     and is tested on amd64 and arm64.
+     - Measured on amd64 with the pinned binaries: threads work, ffmpeg and ffprobe run normally,
+       and `fork`, `posix_spawn`, `system`, `popen` and `setsid` all fail.
+     - Neither binary imports any way to start a process.
+     - Hardware encoding is tested under the filter on real devices: NVIDIA's driver is reported to
+       launch a helper (`nvidia-modprobe`) when its device nodes are missing.
 2. **It treats every frame from FFmpeg as hostile.** On any violation (§5–§8), it logs exactly what
    was wrong and kills FFmpeg. It sends nothing.
 3. **Per channel, one reader of requests and one writer of `DATA`, each its own goroutine, and the
-   channel's own buffer reserve** (outstanding × block size, from the terms).
+   channel's own buffer reserve:** (outstanding + 1) × the longest `READ`, from the terms. That covers
+   one `DATA` being written while the outstanding `READ`s wait. A storage read waits for a free buffer
+   in its channel's reserve, never in another's.
    - **No `DATA` write ever waits on another channel or another run.** FFmpeg's scheduler stops
      reading every input but the one furthest behind, by design. A writer shared between channels
      would block on a paused channel's full pipe and starve the one FFmpeg is waiting for.
@@ -345,8 +369,11 @@ number the other side sent. It allocates only from the terms it set or accepted.
      the pipe, so a paused or slow FFmpeg never holds the disk.
 5. **It counts outstanding `READ`s as §7.4 says.**
 6. **It keeps a budget of bytes served per run,** by kind of run: what the run is expected to need,
-   times a margin, with a floor of a few blocks so a small file or block rounding can't trip it. For
-   example: a probe, a few MiB; a whole-film read, the file's size; a chunk run, the bytes of its span.
+   times a margin, with a floor so a small file or block rounding can't trip it. For example:
+   - **a probe:** a floor of about 64 MiB plus a fraction of the file's size. A probe reads the whole
+     index, about 17 MB for 2.5 hours of a 10-track MP4 (the third audit);
+   - **a whole-film read:** the file's size;
+   - **a chunk run:** the bytes of its span, plus the index (known from the probe), plus the floor.
    A run over its budget is killed and logged. The figures are the parent's settings, and are tested
    against a badly interleaved MP4 before they're fixed (§12).
 7. **A storage read has a deadline:** the stall window of its place (the parent's own watchdog of its disks).
@@ -357,12 +384,14 @@ number the other side sent. It allocates only from the terms it set or accepted.
    - The parent's watchdog counts the bytes it serves as progress. The time it holds a `READ` back
      itself, for pacing or pausing, doesn't count as FFmpeg standing still. A held storage read is
      bounded by its deadline, so nothing waits forever.
-8. **It owns all time.** It kills FFmpeg (SIGKILL of its process group):
+8. **It owns all time.** It kills FFmpeg, the process itself, by pidfd (in Go, `os.Process.Kill`), never
+   by its process group, which a hostile FFmpeg could leave. A ffstreamer run gets SIGKILL only: no
+   SIGINT or SIGTERM first, since nothing the run would write after them is kept. It kills:
    - when it can't read, or the file changed;
    - when the run is over its budget or no longer wanted;
    - when its own limits pass.
 
-   It sends group signals only before it has reaped the process.
+   It signals only before it has reaped the process.
 9. **It knows a run has ended when the process exits,** never from end-of-file on a pipe. Then, per
    channel:
    1. it closes its `DATA` write end;
@@ -376,8 +405,17 @@ number the other side sent. It allocates only from the terms it set or accepted.
     - every channel's `DONE` said `OK` and echoed the run;
     - the parent itself had no read failure.
 
-    A run the parent killed is a stop, recorded as a stop, not a failure. Exiting without `DONE` is a
-    failure.
+    Exiting without `DONE` is a failure. When the parent kills a run, its own reason decides,
+    whatever the exit code:
+    - **a stop:** the run is no longer wanted, or the parent paused it past its patience. It is recorded
+      as a stop, not a failure;
+    - **a failure:**
+      - a violation of the protocol;
+      - a storage read that failed or passed its deadline;
+      - a changed file;
+      - the budget passed.
+
+      The failure is recorded with that reason.
 11. **It sanitises text before logging it.** It decodes as UTF-8 with replacement, then escapes every
     character in the Unicode categories Cc and Cf, DEL included. That catches C0 and C1 controls, CSI
     in either form (`0x9B`, or `C2 9B`) and bidi overrides. Invalid UTF-8 is not a violation.
@@ -410,8 +448,17 @@ These were checked against jellyfin-ffmpeg 8.1.3's source and its pinned binarie
 1. **It opens the channel** (§4) and makes the opening exchange (§7.1–§7.3).
 2. **It reads in blocks.**
    - It asks for whole blocks, aligned to the block size, the last one trimmed at the file's size.
-   - It keeps the last 8 blocks, more than the streams a run reads at once, so a badly interleaved
-     file doesn't thrash the cache.
+   - It keeps the last `cache_blocks` blocks (§4.1). The parent sets it to at least 1.5 × the streams
+     the run reads + 2, since a file whose tracks are stored one after another is read from that many
+     places at once.
+   - Measured on a 10-track MP4 with no interleaving, under prepare's mapping of every track, the
+     bytes fetched were these multiples of the file's size:
+
+     | Blocks kept | 8 | 12 | 16 |
+     | --- | --- | --- | --- |
+     | Bytes fetched | 403× | 4.3× | 1.2× |
+
+     An interleaved file is about 1.1× at 8.
    - It answers a read of any size from them. FFmpeg's I/O layer usually asks 32 KiB, but reads a
      packet larger than its buffer at full size, and grows its buffer while probing. A read may come
      back short; FFmpeg loops.
@@ -450,7 +497,9 @@ These were checked against jellyfin-ffmpeg 8.1.3's source and its pinned binarie
 ### 10.3 Patch 2: fftools (about 15 lines)
 
 It makes an input's read error the run's exit status, where ffmpeg and ffprobe exit 0 today. It
-promotes `pb->error` (when negative and not `EAGAIN`) in three places:
+promotes `pb->error` (when negative and not `EAGAIN`) in the three places below. An `AVERROR_EXIT`,
+which is an interrupt, is promoted as `AVERROR(EINTR)`. Unchanged, ffmpeg's `main` turns
+`AVERROR_EXIT` into exit 0 (reproduced: a SIGTERM during an input's open exited 0).
 - after `input_thread`'s loop, in `ffmpeg_demux.c`;
 - after `avformat_find_stream_info` in `ifile_open`;
 - in ffprobe's `probe_file`, before its end.
@@ -539,8 +588,13 @@ Under these:
   - a grandchild calling `setsid`, which must be refused.
 - **Descriptors:** a run launched while another is being set up never inherits its pipes.
 - **Resources:** channels at the 8 KiB fallback past the per-user pipe cap still work.
-- **The budget:** against a badly interleaved MP4, with the 8-block cache, before its figures are
-  fixed.
+- **The cache and the budget:** against MP4s whose tracks are stored one after another, at 10 and more
+  streams, with the cache set from the stream count, before the budget's figures are fixed.
+- **The seccomp filter, on amd64 and arm64:** threads work; every way of starting a process fails;
+  `setsid` and `setpgid` fail; hardware encoders work on real devices.
+- **Killing:** an FFmpeg that tried to leave its process group is still killed by pidfd.
+- **An interrupt during the open, during probing, and mid-run:** each ends with `DONE`
+  `INTERRUPTED` (where `DONE` is sent) and a non-zero exit.
 - **A dead share:** a storage read that never returns (a FUSE file) must leave FFmpeg killable at
   every point, and the run must end at the read's deadline.
 - **Confined:** under Landlock with no media file granted, and seccomp refusing sockets, `fork` and
@@ -571,6 +625,7 @@ FFmpeg's. It is not in version 1.
 
 ## 14. Still open
 
-1. **The budget's figures per kind of run** (§9.6), to set after the interleaving test.
+1. **The budget's figures per kind of run** (§9.6), set after the cache and interleaving tests.
 2. **The pipe-memory budget** the parent divides among its channels (§4.3), and the value its
    deployment raises `fs.pipe-user-pages-soft` to.
+3. **The exact formula for `cache_blocks`** (§10.2), confirmed by those same tests.
