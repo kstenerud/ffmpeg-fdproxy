@@ -16,8 +16,25 @@ five audits ([audits/](audits/)). The patches are written:
 - `patches/9001-fftools-input-errors.patch`: ffmpeg and ffprobe exit non-zero when an input's reads
   failed.
 
-They pass the suite (`test/suite.py`, 26 cases) against a development build. The release build with
-jellyfin-ffmpeg's toolchain is next.
+**Built with jellyfin-ffmpeg's own toolchain** (8.1.2-5, linux64-gpl), on a 12-core machine:
+- **The unpatched build reproduces jellyfin's release:** its build configuration, encoders and
+  hardware accelerators are identical to the published binary.
+- **The patched build differs only by the `ffstreamer` protocol.**
+- **Build times:** 74 minutes cold, 7 minutes warm, with the toolchain image cached.
+
+**The suite** (`test/suite.py`, 26 cases) passes against the release build:
+- every run shape a media server uses, byte-identical read directly and through the protocol;
+- every failure path as PROTOCOL.md specifies.
+
+Also checked, byte-identical:
+- a libx264 chunk encode;
+- an HLS fMP4 prepare (52 files).
+
+**Still to do:**
+- arm64;
+- runs under a parent's confinement (Landlock, and the new seccomp filter);
+- hardware encoders on real devices;
+- CI, once the repository moves to GitHub.
 
 This repository lives in a sandbox's shared files for now. It moves to GitHub, with its own CI and
 releases, once the protocol and patches are viable.
