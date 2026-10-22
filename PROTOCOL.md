@@ -471,17 +471,14 @@ after the `REQUEST`) the open's own failure path.
 1. **It opens the channel** (§4) and makes the opening exchange (§7.1–§7.3).
 2. **It reads in blocks.**
    - It asks for whole blocks, aligned to the block size, the last one trimmed at the file's size.
-   - It keeps the last `cache_blocks` blocks (§4.1). The parent sets it to at least 1.5 × the streams
-     the run reads + 2, since a file whose tracks are stored one after another is read from that many
-     places at once.
-   - Measured on a 10-track MP4 with no interleaving, under prepare's mapping of every track, the
-     bytes fetched were these multiples of the file's size:
-
-     | Blocks kept | 8 | 12 | 16 |
-     | --- | --- | --- | --- |
-     | Bytes fetched | 403× | 4.3× | 1.2× |
-
-     An interleaved file is about 1.1× at 8.
+   - It keeps the last `cache_blocks` blocks (§4.1). A file whose tracks are stored one after another
+     is read from as many places at once as it has tracks, at least while FFmpeg opens it, whatever
+     the run maps: see §14 for how many blocks that takes.
+   - Measured with the patched FFmpeg (bench/RESULTS.md): an interleaved film is read about once at
+     any size; one whose 11 tracks are stored one after another was read 25 times over at 24 blocks
+     of 1 MiB and a third of once at 48, and a prepare mapping all 25 tracks of another thrashed at
+     every size measured. A simulation had found 1.2 times at 16 blocks; FFmpeg's real reads need
+     more.
    - It answers a read of any size from them. FFmpeg's I/O layer usually asks 32 KiB, but reads a
      packet larger than its buffer at full size, and grows its buffer while probing. A read may come
      back short; FFmpeg loops.
@@ -660,7 +657,14 @@ FFmpeg's. It is not in version 1.
 
 ## 14. Still open
 
-1. **The budget's figures per kind of run** (§9.6), set after the cache and interleaving tests.
-2. **The pipe-memory budget** the parent divides among its channels (§4.3), and the value its
-   deployment raises `fs.pipe-user-pages-soft` to.
-3. **The exact formula for `cache_blocks`** (§10.2), confirmed by those same tests.
+1. **The budget's figures per kind of run** (§9.6). Measured (bench/RESULTS.md): an interleaved
+   film is read about once through, and a probe reads a few percent of it. One parent's figures: a
+   whole read the film and a quarter, a probe a sixteenth of it, each over a 64 MiB floor.
+2. **The pipe-memory budget** (§4.3). Measured: at the 8 KiB fallback a read runs at half the speed
+   of a 1 MiB pipe, still past a disk's. At 1 MiB a channel, the default cap holds about sixty
+   channels, so a deployment raises `fs.pipe-user-pages-soft` only when it runs more at once.
+3. **`cache_blocks`** (§10.2). The formula from the streams a run reads is wrong: FFmpeg reads every
+   track while it opens a film, whatever the run maps, and a film whose tracks are stored one after
+   another needs about two blocks for each and thrashes, at once and badly, below that. Random
+   eviction is no fix (bench/RESULTS.md). To decide: a cache sized from the film's tracks, or a
+   policy that keeps a block or two for each region FFmpeg reads.

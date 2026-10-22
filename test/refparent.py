@@ -34,6 +34,7 @@ class Parent:
         self.expected = 0               # the sequence number expected next
         self.terms = None
         self.after_done_frames = 0
+        self.trace = open(args.trace, "w", encoding="utf-8") if args.trace else None  # each READ answered
 
     # --- channel ---------------------------------------------------------------
     def make_pipes(self):
@@ -194,6 +195,8 @@ class Parent:
                 os.close(self.parent_write)
                 return
             data = os.pread(self.file.fileno(), length, offset)
+            if self.trace:
+                self.trace.write(f"{offset} {length}\n")
             if self.args.delay_ms:
                 time.sleep(self.args.delay_ms / 1000)
             if self.args.wrong_number_at == answered:
@@ -298,6 +301,7 @@ def main():
     parser.add_argument("--signal-after-ms", type=int)
     parser.add_argument("--signal", type=int, default=15)
     parser.add_argument("--capture", action="store_true", help="hash the child's stdout")
+    parser.add_argument("--trace", help="write each READ answered to this file: offset and length, a line each")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command and args.command[0] == "--" else args.command
