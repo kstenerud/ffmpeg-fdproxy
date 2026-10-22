@@ -34,7 +34,8 @@ The full output, both runs, is in `transport-results.txt`.
 
 **Setup:**
 - FFmpeg's real reads of its input (offsets, lengths, and its processing time between reads),
-  traced with strace for every run shape a media server uses. The traces are in `traces/`.
+  traced with strace for every run shape a media server uses: `trace.sh FFMPEG_DIR MEDIA_DIR` writes
+  them to `traces/`, and `prefetch_sim.py MEDIA_DIR` replays them.
 - Each trace is replayed through 1 MiB blocks, with the last four kept, and a disk that serves one
   request at a time.
 - **Busy** puts another stream's 1 MiB read before each of ours.

@@ -48,14 +48,14 @@ Also checked:
 | `patches/` | The patches, appended to jellyfin-ffmpeg's own `debian/patches/series`. |
 | `src/` | The protocol's source, from which `patches/9000` is made. |
 | `tools/` | Scripts for the development tree (`build_dev.sh`, and the edits it applies). |
-| `bench/` | The measurements behind the protocol's choices, and FFmpeg's read traces. |
+| `bench/` | The measurements behind the protocol's choices, and the scripts that make them. |
 | `audits/` | The audits of each draft. |
 | `test/` | A reference server and the tests every build must pass. |
 
 ## Licence
 
-The protocol's source (`src/libavformat/ffstreamer.c`, and so `patches/9000`) carries FFmpeg's own
-header, LGPL 2.1 or later, as any file contributed to FFmpeg does. The binaries built with these
-patches are GPL, as jellyfin-ffmpeg's builds are: its configuration enables GPL libraries such as
-x264. Every release publishes the patches and the jellyfin-ffmpeg tag it applies to, so its source
-can always be had.
+LGPL 2.1 or later ([LICENSE](LICENSE)), as FFmpeg's own source is: the patches, the protocol and
+its grammar, the reference parent and the tests. The binaries built with these patches are GPL, as
+jellyfin-ffmpeg's builds are, since its configuration enables GPL libraries such as x264. Every
+release publishes the patches and the jellyfin-ffmpeg tag it applies to, so its source can always
+be had.
