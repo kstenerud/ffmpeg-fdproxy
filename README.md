@@ -46,13 +46,19 @@ Also checked:
 
 ```
 make build-amd64          # or build-arm64; the tarball and its binaries land in dist/
-make test MEDIA=<dir>     # the suite, against dist/bin-amd64, with film.mkv and film-moov-at-end.mp4
+make media                # the suite's two films, made from FFmpeg's test sources into media/
+make test                 # the suite, against dist/bin-amd64, with the films in media/
 make fuzz                 # FFmpeg's side fuzzed for 10 minutes under ASan and UBSan
 ```
 
 `build.sh` checks out jellyfin-ffmpeg at the tag in `JELLYFIN_TAG`, adds `patches/` after
 jellyfin's own `debian/patches/series`, and runs jellyfin's portable builder, which needs Docker. The
 first build makes its toolchain image, an hour or more; later builds take minutes.
+
+`make media` writes the suite's films with the patched FFmpeg's own test sources
+(`test/make_media.py`): five minutes of 720p H.264, a 5.1 and a stereo track, subtitles and
+chapters, as Matroska and as MP4 with its index at the end. They take a minute and 240 MB. The suite
+takes any films with those four streams in that order (`MEDIA=<dir>`).
 
 `make fuzz` builds `fuzz/ffstreamer_fuzzer.c`, a libFuzzer harness that feeds the protocol arbitrary
 bytes as the parent's frames, with AddressSanitizer and UndefinedBehaviorSanitizer, against a minimal

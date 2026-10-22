@@ -17,6 +17,10 @@ build-amd64: ## Build the patched FFmpeg for linux/amd64 into OUT (default dist/
 build-arm64: ## Build the patched FFmpeg for linux/arm64 into OUT (default dist/); needs Docker
 	./build.sh arm64 $(OUT)
 
+.PHONY: media
+media: ## Make the suite's films into MEDIA (default media/) from FFmpeg's test sources, with BIN's ffmpeg
+	python3 test/make_media.py --ffmpeg $(BIN)/ffmpeg $(MEDIA)
+
 .PHONY: test
 test: ## Run the suite against BIN (default dist/bin-amd64) with MEDIA (film.mkv, film-moov-at-end.mp4)
 	python3 test/suite.py --bin $(BIN) --media $(MEDIA)

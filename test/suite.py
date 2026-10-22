@@ -5,8 +5,8 @@ then the failure paths through the reference parent.
     suite.py --bin DIR --media DIR
 
 DIR holds ffmpeg and ffprobe built with the patches. The media are film.mkv and
-film-moov-at-end.mp4 (bench/: a 5-minute 1080p film with a 5.1 and a stereo track and
-an SRT track). It prints a table and exits non-zero when any case fails."""
+film-moov-at-end.mp4, at least 5 minutes long and over 50 MiB, with video, a 5.1 track, a stereo
+track and subtitles as streams 0 to 3: make_media.py makes them. It prints a table and exits non-zero when any case fails."""
 import argparse, hashlib, json, os, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))

@@ -3,3 +3,5 @@ bench/traces/
 # jellyfin-ffmpeg's checkout and builds, made by build.sh.
 build/
 dist/
+# The suite's films, made by make media.
+media/
