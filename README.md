@@ -35,12 +35,15 @@ Apple M4 under OrbStack (Linux 7.0):
 Also checked:
 - byte-identical: a libx264 chunk encode, and an HLS fMP4 prepare (52 files);
 - NVENC on an RTX 3090 through the protocol, frame-identical to a direct run;
+- VAAPI on an AMD Radeon RX 6600 XT and on Intel Gen 8 and 9.5 graphics, confined and through the
+  protocol, decoding to the frames of a direct run;
 - under a parent's confinement (Landlock and the seccomp filter of the specification's Launching) on amd64 and
   arm64: a threaded libx264 encode and ffprobe run normally, and starting a process, leaving the
   session or the process group all fail.
 
 **Still to do:**
-- hardware encoders under confinement: NVENC passes on an RTX 3090; VAAPI and QSV are untested.
+- Quick Sync through the protocol, on Intel Gen 12 and later (the runtime jellyfin-ffmpeg uses
+  supports nothing older; VAAPI covers those).
 
 ## Building
 
