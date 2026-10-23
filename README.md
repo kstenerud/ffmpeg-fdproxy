@@ -1,50 +1,74 @@
-# ffmpeg-ffstreamer
+# FFmpeg + FFstreamer
 
-A new way to feed data into FFmpeg in a security-constrained environment. These patches on top of
-[jellyfin-ffmpeg](https://github.com/jellyfin/jellyfin-ffmpeg) add `ffstreamer`, a protocol over
-which a parent process serves every read FFmpeg makes of its input, by byte offset, over two pipes
-it hands down.
+FFstreamer is a new way to feed data into FFmpeg in a security-constrained environment. These
+patches on top of [jellyfin-ffmpeg](https://github.com/jellyfin/jellyfin-ffmpeg) add `ffstreamer`,
+a protocol over which a parent process serves every read FFmpeg makes of its input, by byte offset,
+over two pipes it hands down.
 
 FFmpeg confined by a sandbox (Landlock, seccomp, or a container) can then read its input with no
-path to the file, no socket, and no other way to reach the storage: the parent decides every read,
-and can schedule, pace, share or refuse it. Storage that stops answering, such as a network share
-that has gone away, holds a thread of the parent, which notices and can always end the run, never
-FFmpeg waiting in the kernel where it cannot be killed. Each side checks every frame the other
+path to the file, no socket, and no other way to reach the storage. The parent decides every read,
+and can schedule, pace, share or refuse it. Storage that stops answering (such as a network share
+that has gone away) holds a thread of the parent, which notices and can always end the run, rather
+than FFmpeg waiting in the kernel where it cannot be killed. Each side checks every frame the other
 sends, so an FFmpeg taken over by a crafted input can only ask for ranges of the one file it was
 given.
 
-**Status:** implemented. The protocol is specified in
-[ffstreamer-specification.md](ffstreamer-specification.md), version 1, after six drafts and four
-audits ([audits/](audits/)); [DESIGN.md](DESIGN.md) says why it is as it is. The patches:
-- `patches/9000-ffstreamer-protocol.patch`: the protocol in libavformat, plus its registration;
-- `patches/9001-fftools-input-errors.patch`: ffmpeg and ffprobe exit non-zero when an input's reads
-  failed.
+## Documents
 
-**Built with jellyfin-ffmpeg's own toolchain** (8.1.2-5, linux64-gpl and linuxarm64-gpl), on a
-12-core machine:
-- **The unpatched build reproduces jellyfin's release:** its build configuration, encoders and
+* [ffstreamer-specification.md](ffstreamer-specification.md)
+* [ffstreamer.dogma](ffstreamer.dogma)
+* [DESIGN.md](DESIGN.md)
+
+## Code
+
+* [Patch: ffstreamer protocol in libavformat](patches/9000-ffstreamer-protocol.patch)
+* [Patch: ffmpeg and ffprobe exit non-zero when an input's reads failed](patches/9001-fftools-input-errors.patch)
+
+## Verification
+
+### Built with jellyfin-ffmpeg's own toolchain
+
+(8.1.2-5, linux64-gpl and linuxarm64-gpl, on a 12-core machine)
+
+* The unpatched build reproduces jellyfin's release: its build configuration, encoders and
   hardware accelerators are identical to the published binary.
-- **The patched build differs only by the `ffstreamer` protocol.**
-- **Build times:** amd64 74 minutes cold, 7 warm; arm64 64 minutes cold (its cross toolchain).
+* The patched build differs only by the `ffstreamer` protocol.
+* Build times: amd64 74 minutes cold, 7 warm; arm64 64 minutes cold (its cross toolchain).
 
-**The suite** (`test/suite.py`, 27 cases) passes on both architectures: amd64, and arm64 on an
-Apple M4 under OrbStack (Linux 7.0):
-- every run shape a media server uses, byte-identical read directly and through the protocol;
-- every failure path as the specification says.
+### Test suite
 
-Also checked:
-- byte-identical: a libx264 chunk encode, and an HLS fMP4 prepare (52 files);
-- NVENC on an RTX 3090 through the protocol, frame-identical to a direct run;
-- VAAPI on an AMD Radeon RX 6600 XT and on Intel Gen 8, 9.5 and 12 graphics, and Quick Sync on Intel
-  Gen 12 (an i3-N305, in a Proxmox container), confined and through the protocol, decoding to the
-  frames of a direct run. Quick Sync's runtime supports nothing older than Gen 12; VAAPI covers those;
-- under a parent's confinement (Landlock and the seccomp filter of the specification's Launching) on amd64 and
-  arm64: a threaded libx264 encode and ffprobe run normally, and starting a process, leaving the
-  session or the process group all fail.
+(`test/suite.py`, 27 cases, verified on amd64, and arm64 on an Apple M4 under OrbStack (Linux 7.0))
+
+* Every run shape a media server uses, byte-identical read directly and through the protocol.
+* Every failure path as the specification says.
+
+### Hardware encoders
+
+(confined, and reading through the protocol)
+
+* NVENC on an NVIDIA RTX 3090, frame-identical to a direct run.
+* VAAPI on an AMD Radeon RX 6600 XT, and on Intel Gen 8, 9.5 and 12 graphics, decoding to the frames
+  of a direct run.
+* Quick Sync on Intel Gen 12 (an i3-N305, in a Proxmox container), decoding to the frames of a
+  direct run. The Quick Sync runtime jellyfin-ffmpeg uses supports nothing older than Gen 12; VAAPI
+  covers those.
+
+### Fuzzing
+
+* FFmpeg's side, under AddressSanitizer and UndefinedBehaviorSanitizer: four hours on eight workers,
+  2.1 billion inputs, after a first long run found (and kept as a seed) a file size near the top of
+  int64 that overflowed rounding up to whole blocks.
+
+### Also checked
+
+* Byte-identical: a libx264 chunk encode, and an HLS fMP4 prepare (52 files).
+* Under a parent's confinement (Landlock and the seccomp filter of the specification's Launching)
+  on amd64 and arm64: a threaded libx264 encode and ffprobe run normally, and starting a process,
+  leaving the session or the process group all fail.
 
 ## Building
 
-```
+```bash
 make build-amd64          # or build-arm64; the tarball and its binaries land in dist/
 make media                # the suite's two films, made from FFmpeg's test sources into media/
 make test                 # the suite, against dist/bin-amd64, with the films in media/
@@ -66,35 +90,34 @@ takes any films with those four streams in that order (`MEDIA=<dir>`).
 `make fuzz` builds `fuzz/ffstreamer_fuzzer.c`, a libFuzzer harness that feeds the protocol arbitrary
 bytes as the parent's frames, with AddressSanitizer and UndefinedBehaviorSanitizer, against a minimal
 FFmpeg built the same way, and runs it on eight workers from the seeds in `fuzz/corpus/`
-(`fuzz/make_corpus.py` writes them), then makes seeks at the edges of the arithmetic. Ten minutes,
-17 million inputs, found nothing; a four-hour run then found that a file size near the top of int64
-overflowed rounding up to whole blocks, fixed and kept as a seed.
+(`fuzz/make_corpus.py` writes them), then makes seeks at the edges of the arithmetic.
 
 ## Layout
 
 | Path | What |
 | --- | --- |
-| `ffstreamer-specification.md` | The protocol between FFmpeg and the process that serves its reads. |
-| `DESIGN.md` | Why the protocol is as it is: rationale, FFmpeg's internals, testing, measurements, open questions. |
-| `ffstreamer.dogma` | The protocol's wire format, in [Dogma](https://github.com/kstenerud/dogma). |
-| `patches/` | The patches, appended to jellyfin-ffmpeg's own `debian/patches/series`. |
-| `src/` | The protocol's source, from which `patches/9000` is made. |
-| `checkout.sh`, `build.sh`, `Makefile`, `JELLYFIN_TAG` | Building the patched FFmpeg (above). |
-| `fuzz/` | The fuzz harness of FFmpeg's side, its build and its seeds. |
-| `tools/` | `check_patch.py`, `check_spec.py` and `sync_patch.py`, and scripts for the development tree (`build_dev.sh`, and the edits it applies). |
-| `.github/workflows/` | CI and releases (below). |
-| `bench/` | The measurements behind the protocol's choices, and the scripts that make them. |
-| `audits/` | The audits of each draft. |
-| `test/` | A reference server and the tests every build must pass. |
+| [`ffstreamer-specification.md`](ffstreamer-specification.md) | The protocol between FFmpeg and the process that serves its reads. |
+| [`DESIGN.md`](DESIGN.md) | Why the protocol is as it is: rationale, FFmpeg's internals, testing, measurements, open questions. |
+| [`ffstreamer.dogma`](ffstreamer.dogma) | The protocol's wire format, in [Dogma](https://github.com/kstenerud/dogma). |
+| [`patches/`](patches/) | The patches, appended to jellyfin-ffmpeg's own `debian/patches/series`. |
+| [`src/`](src/) | The protocol's source, from which `patches/9000` is made. |
+| [`checkout.sh`](checkout.sh), [`build.sh`](build.sh), [`Makefile`](Makefile), [`JELLYFIN_TAG`](JELLYFIN_TAG) | Building the patched FFmpeg (above). |
+| [`fuzz/`](fuzz/) | The fuzz harness of FFmpeg's side, its build and its seeds. |
+| [`tools/`](tools/) | `check_patch.py`, `check_spec.py` and `sync_patch.py`, and scripts for the development tree (`build_dev.sh`, and the edits it applies). |
+| [`.github/workflows/`](.github/workflows/) | CI and releases (below). |
+| [`bench/`](bench/) | The measurements behind the protocol's choices, and the scripts that make them. |
+| [`audits/`](audits/) | The audits of each draft. |
+| [`test/`](test/) | A reference server and the tests every build must pass. |
 
 ## CI and releases
 
 `.github/workflows/`:
-- **ci**, on every pull request and push to main: the patch check, five minutes of fuzzing, then
-  the build and the suite on amd64 and arm64, each on its own architecture. A build starts cold,
-  about an hour, because jellyfin's toolchain cache is larger than an Actions cache.
-- **fuzz-weekly**: five hours of fuzzing every Sunday.
-- **release**, on a tag `v<jellyfin version>-<n>` (`v8.1.2-5-1` is the first release on
+
+* **ci**, on every pull request and push to main: the patch and grammar checks, five minutes of
+  fuzzing, then the build and the suite on amd64 and arm64, each on its own architecture. A build
+  starts cold, about an hour, because jellyfin's toolchain cache is larger than an Actions cache.
+* **fuzz-weekly**: five hours of fuzzing every Sunday.
+* **release**, on a tag `v<jellyfin version>-<n>` (`v8.1.2-5-1` is the first release on
   jellyfin-ffmpeg v8.1.2-5): the same build and suite, then a release holding
   `ffmpeg-ffstreamer_<version>_linux64-gpl.tar.xz`, `…_linuxarm64-gpl.tar.xz` and `SHA256SUMS`. The
   tarballs are laid out as jellyfin's portable ones, `ffmpeg` and `ffprobe` at the root.
