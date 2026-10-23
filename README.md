@@ -61,6 +61,9 @@ given.
 
 ### Also checked
 
+* Claims, under AddressSanitizer and UndefinedBehaviorSanitizer (`test/claims_test.c`): a second
+  session on a pipe that is open already is refused, and a hundred sessions in turn, each on a new
+  pipe at the descriptor number the last one closed, all open.
 * Byte-identical: a libx264 chunk encode, and an HLS fMP4 prepare (52 files).
 * Under a parent's confinement (Landlock and the seccomp filter of the specification's Launching)
   on amd64 and arm64: a threaded libx264 encode and ffprobe run normally, and starting a process,
@@ -73,6 +76,7 @@ make build-amd64          # or build-arm64; the tarball and its binaries land in
 make media                # the suite's two films, made from FFmpeg's test sources into media/
 make test                 # the suite, against dist/bin-amd64, with the films in media/
 make fuzz                 # FFmpeg's side fuzzed for 10 minutes under ASan and UBSan
+make test-claims          # a pipe serves one session at a time; a closed one's number serves the next
 make check-patch          # patches/9000 carries src/libavformat/ffstreamer.c as it stands
 make check-spec           # the specification embeds ffstreamer.dogma as it stands
 make patch                # rewrites patches/9000 from src/ after an edit there
@@ -91,6 +95,7 @@ takes any films with those four streams in that order (`MEDIA=<dir>`).
 bytes as the parent's frames, with AddressSanitizer and UndefinedBehaviorSanitizer, against a minimal
 FFmpeg built the same way, and runs it on eight workers from the seeds in `fuzz/corpus/`
 (`fuzz/make_corpus.py` writes them), then makes seeks at the edges of the arithmetic.
+`make test-claims` builds `test/claims_test.c` the same way and runs it.
 
 ## Layout
 
@@ -113,8 +118,8 @@ FFmpeg built the same way, and runs it on eight workers from the seeds in `fuzz/
 
 `.github/workflows/`:
 
-* **ci**, on every pull request and push to main: the patch and grammar checks, five minutes of
-  fuzzing, then the build and the suite on amd64 and arm64, each on its own architecture. A build
+* **ci**, on every pull request and push to main: the patch and grammar checks, the claims test,
+  five minutes of fuzzing, then the build and the suite on amd64 and arm64, each on its own architecture. A build
   starts cold, about an hour, because jellyfin's toolchain cache is larger than an Actions cache.
 * **fuzz-weekly**: five hours of fuzzing every Sunday.
 * **release**, on a tag `v<jellyfin version>-<n>` (`v8.1.2-5-1` is the first release on

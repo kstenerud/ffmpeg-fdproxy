@@ -42,6 +42,11 @@ media: ## Make the suite's films into MEDIA (default media/) from FFmpeg's test 
 test: ## Run the suite against BIN (default dist/bin-amd64) with MEDIA (film.mkv, film-moov-at-end.mp4)
 	python3 test/suite.py --bin $(BIN) --media $(MEDIA)
 
+.PHONY: test-claims
+test-claims: checkout ## Check that a pipe serves one session at a time and a closed one's descriptor serves the next
+	fuzz/build.sh build/jellyfin-ffmpeg build/fuzz
+	docker run --rm -v "$$PWD/build/fuzz":/work -w /work debian:trixie ./claims_test
+
 .PHONY: fuzz
 fuzz: checkout ## Fuzz FFmpeg's side for FUZZ_SECONDS (default 600) on FUZZ_JOBS workers under ASan and UBSan
 	fuzz/build.sh build/jellyfin-ffmpeg build/fuzz

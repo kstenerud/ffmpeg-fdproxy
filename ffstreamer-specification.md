@@ -240,8 +240,11 @@ Each input restricts itself to this protocol and names its channel:
 That check is a sanity check. The proof that the parent is on the other end is the `HELLO` round
 trip.
 
-**A channel opens once per process.** FFmpeg's side **MUST** refuse a second open of the same
-channel, even after the first session has closed, since unread `DATA` may still be in the pipe.
+**A channel carries one session.** FFmpeg's side **MUST** refuse to open a channel whose
+parent-to-FFmpeg pipe is already open in the process, through whichever descriptor reaches it, and
+**MUST** close both its descriptors when the session closes, so no later open reaches that pipe
+again through them: unread `DATA` may still be in it. It knows a pipe by `fstat`'s device and inode,
+not by descriptor number, which the process reuses for new pipes.
 
 
 ### Pipe Sizes

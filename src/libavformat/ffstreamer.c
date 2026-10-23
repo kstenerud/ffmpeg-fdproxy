@@ -121,33 +121,64 @@ typedef struct FFStreamerContext {
     int fault;          /* a sticky AVERROR, 0 while healthy */
     int fault_kind;
     int done_sent;
+
+    /* The pipe the parent's messages arrive on, claimed while the session is open. */
+    int     claimed;
+    dev_t   claimed_device;
+    ino_t   claimed_inode;
+    struct FFStreamerContext *next_claim;
 } FFStreamerContext;
 
-/* The channels claimed in this process: each opens once, for the process's life. */
-#define FFS_MAX_CLAIMS 64
+/* The sessions open in this process, by the pipe the parent's messages arrive on: a pipe serves
+ * one session at a time, through whichever descriptor reaches it. */
 static AVMutex claims_lock = AV_MUTEX_INITIALIZER;
-static int claimed_read_fds[FFS_MAX_CLAIMS];
-static int claimed_count;
+static FFStreamerContext *claims;
 
-static int claim_channel(int read_fd)
+static int claim_channel(URLContext *h)
 {
+    FFStreamerContext *c = h->priv_data;
+    struct stat facts;
     int ret = 0;
 
-    ff_mutex_lock(&claims_lock);
-    for (int i = 0; i < claimed_count; i++) {
-        if (claimed_read_fds[i] == read_fd) {
-            ret = AVERROR(EBUSY);
-            goto end;
-        }
-    }
-    if (claimed_count == FFS_MAX_CLAIMS) {
-        ret = AVERROR(EMFILE);
+    if (fstat(c->read_fd, &facts) < 0 || !S_ISFIFO(facts.st_mode)) {
+        av_log(h, AV_LOG_ERROR, "ffstreamer: descriptor %d is not a pipe\n", c->read_fd);
+        ret = AVERROR(EBADF);
         goto end;
     }
-    claimed_read_fds[claimed_count++] = read_fd;
-end:
+    ff_mutex_lock(&claims_lock);
+    for (FFStreamerContext *other = claims; other; other = other->next_claim) {
+        if (other->claimed_device == facts.st_dev && other->claimed_inode == facts.st_ino) {
+            av_log(h, AV_LOG_ERROR, "ffstreamer: the channel on descriptor %d is open already\n",
+                   c->read_fd);
+            ret = AVERROR(EBUSY);
+            goto unlock;
+        }
+    }
+    c->claimed_device = facts.st_dev;
+    c->claimed_inode  = facts.st_ino;
+    c->next_claim     = claims;
+    claims            = c;
+    c->claimed        = 1;
+unlock:
     ff_mutex_unlock(&claims_lock);
+end:
     return ret;
+}
+
+static void release_channel(FFStreamerContext *c)
+{
+    if (!c->claimed)
+        return;
+    ff_mutex_lock(&claims_lock);
+    for (FFStreamerContext **at = &claims; *at; at = &(*at)->next_claim) {
+        if (*at == c) {
+            *at = c->next_claim;
+            break;
+        }
+    }
+    ff_mutex_unlock(&claims_lock);
+    c->claimed    = 0;
+    c->next_claim = NULL;
 }
 
 static int8_t next_sequence(int8_t sequence)
@@ -443,8 +474,10 @@ end:
     return ret;
 }
 
+/* Closing its descriptors ends the session's claim: no later open reaches its pipe through them. */
 static void close_descriptors(FFStreamerContext *c)
 {
+    release_channel(c);
     if (c->read_fd >= 0)
         close(c->read_fd);
     if (c->write_fd >= 0)
@@ -483,10 +516,8 @@ static int ffstreamer_open(URLContext *h, const char *url, int flags)
         ret = AVERROR(EINVAL);
         goto unclaimed;
     }
-    if ((ret = claim_channel(c->read_fd)) < 0) {
-        av_log(h, AV_LOG_ERROR, "ffstreamer: the channel on descriptor %d was opened before\n", c->read_fd);
+    if ((ret = claim_channel(h)) < 0)
         goto unclaimed;
-    }
     if ((ret = check_descriptor(h, c->read_fd, O_RDONLY)) < 0 ||
         (ret = check_descriptor(h, c->write_fd, O_WRONLY)) < 0)
         goto fail;

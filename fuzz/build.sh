@@ -1,12 +1,13 @@
 #!/bin/sh
-# Builds the libFuzzer harness of ffstreamer's FFmpeg side, with AddressSanitizer and
-# UndefinedBehaviorSanitizer, against a minimal FFmpeg built the same way from jellyfin-ffmpeg: either
+# Builds the libFuzzer harness of ffstreamer's FFmpeg side, and test/claims_test.c, with
+# AddressSanitizer and UndefinedBehaviorSanitizer, against a minimal FFmpeg built the same way from jellyfin-ffmpeg: either
 # checkout.sh's checkout, whose debian/patches/series it applies with quilt into OUT_DIR/src, or a tree
 # with the series already applied.
 #
 #     fuzz/build.sh SOURCE_TREE OUT_DIR
 #
-# It runs in Docker (debian:trixie, clang); `make fuzz` builds it and runs it.
+# It runs in Docker (debian:trixie, clang); `make fuzz` builds the harness and runs it, and
+# `make test-claims` the test.
 set -eu
 if [ $# -ne 2 ]; then
     echo "usage: $0 SOURCE_TREE OUT_DIR" >&2
@@ -16,7 +17,7 @@ source=$(cd "$1" && pwd)
 mkdir -p "$2"
 out=$(cd "$2" && pwd)
 here=$(cd "$(dirname "$0")" && pwd)
-docker run --rm -v "$source":/src:ro -v "$out":/out -v "$here":/fuzz:ro debian:trixie bash -c '
+docker run --rm -v "$source":/src:ro -v "$out":/out -v "$here":/fuzz:ro -v "$here/../test":/test:ro debian:trixie bash -c '
 set -e
 apt-get update -qq >/dev/null
 apt-get install -y -qq clang make pkg-config quilt >/dev/null 2>&1
@@ -46,5 +47,9 @@ clang -fsanitize=address,undefined,fuzzer -fno-sanitize-recover=undefined -g -O1
     -I/out/objs -I"$src" /fuzz/ffstreamer_fuzzer.c \
     libavformat/libavformat.a libavcodec/libavcodec.a libavutil/libavutil.a -lm -lpthread \
     -o /out/ffstreamer_fuzzer
-echo built /out/ffstreamer_fuzzer
+clang -fsanitize=address,undefined -fno-sanitize-recover=undefined -g -O1 \
+    -I/out/objs -I"$src" /test/claims_test.c \
+    libavformat/libavformat.a libavcodec/libavcodec.a libavutil/libavutil.a -lm -lpthread \
+    -o /out/claims_test
+echo built /out/ffstreamer_fuzzer /out/claims_test
 '

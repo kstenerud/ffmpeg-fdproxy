@@ -21,8 +21,8 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-/* The protocol itself, included so the harness can forget its claims between inputs: the real one
- * lets a channel open once per process. Its URLProtocol is renamed, so the library's stays apart. */
+/* The protocol itself, included so the harness can call its functions directly. Its URLProtocol is
+ * renamed, so the library's stays apart. */
 #define ff_ffstreamer_protocol fuzz_ffstreamer_protocol
 #include "libavformat/ffstreamer.c"
 
@@ -59,7 +59,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
     if (size > MOST_INPUT_BYTES)
         size = MOST_INPUT_BYTES;
-    claimed_count = 0;
 
     if (pipe(to_ffmpeg) < 0)
         goto end;
