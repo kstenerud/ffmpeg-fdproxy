@@ -1,7 +1,6 @@
 # Measurements, 2026-10-22
 
-Measurements for the protocol's open choices. They don't change PROTOCOL.md, which stays at draft 1
-until the author says to revise it.
+Measurements behind the protocol's choices: [DESIGN.md](../DESIGN.md) says what each decided.
 
 ## Transport: pipes against shared memory (`transport.c`)
 

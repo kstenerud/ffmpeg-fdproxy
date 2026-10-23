@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Measures the bytes each run shape is served through ffstreamer, against films whose tracks are
-stored one after another, for the block cache's size and the budget's figures (PROTOCOL.md §14).
+stored one after another, for the block cache's size and the budget's figures (DESIGN.md, The Block Cache).
 
     interleave.py --bin DIR --work DIR [--quick]
 
@@ -17,7 +17,7 @@ SECONDS = 300
 
 
 def cache_blocks(streams):
-    """The node's formula (PROTOCOL.md §10.2): 1.5 x the streams read, + 2, at least 2."""
+    """The formula these measurements disproved: 1.5 x the streams read, + 2, at least 2."""
     return max(2, (3 * streams + 1) // 2 + 2)
 
 

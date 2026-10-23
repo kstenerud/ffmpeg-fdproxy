@@ -13,8 +13,9 @@ FFmpeg waiting in the kernel where it cannot be killed. Each side checks every f
 sends, so an FFmpeg taken over by a crafted input can only ask for ranges of the one file it was
 given.
 
-**Status:** implementing. The protocol is [PROTOCOL.md](PROTOCOL.md), draft 6, ready to implement after
-five audits ([audits/](audits/)). The patches are written:
+**Status:** implemented. The protocol is specified in
+[ffstreamer-specification.md](ffstreamer-specification.md), version 1, after six drafts and four
+audits ([audits/](audits/)); [DESIGN.md](DESIGN.md) says why it is as it is. The patches:
 - `patches/9000-ffstreamer-protocol.patch`: the protocol in libavformat, plus its registration;
 - `patches/9001-fftools-input-errors.patch`: ffmpeg and ffprobe exit non-zero when an input's reads
   failed.
@@ -26,15 +27,15 @@ five audits ([audits/](audits/)). The patches are written:
 - **The patched build differs only by the `ffstreamer` protocol.**
 - **Build times:** amd64 74 minutes cold, 7 warm; arm64 64 minutes cold (its cross toolchain).
 
-**The suite** (`test/suite.py`, 26 cases) passes on both architectures: amd64, and arm64 on an
+**The suite** (`test/suite.py`, 27 cases) passes on both architectures: amd64, and arm64 on an
 Apple M4 under OrbStack (Linux 7.0):
 - every run shape a media server uses, byte-identical read directly and through the protocol;
-- every failure path as PROTOCOL.md specifies.
+- every failure path as the specification says.
 
 Also checked:
 - byte-identical: a libx264 chunk encode, and an HLS fMP4 prepare (52 files);
 - NVENC on an RTX 3090 through the protocol, frame-identical to a direct run;
-- under a parent's confinement (Landlock and the seccomp filter of PROTOCOL.md §9.1) on amd64 and
+- under a parent's confinement (Landlock and the seccomp filter of the specification's Launching) on amd64 and
   arm64: a threaded libx264 encode and ffprobe run normally, and starting a process, leaving the
   session or the process group all fail.
 
@@ -49,6 +50,7 @@ make media                # the suite's two films, made from FFmpeg's test sourc
 make test                 # the suite, against dist/bin-amd64, with the films in media/
 make fuzz                 # FFmpeg's side fuzzed for 10 minutes under ASan and UBSan
 make check-patch          # patches/9000 carries src/libavformat/ffstreamer.c as it stands
+make check-spec           # the specification embeds ffstreamer.dogma as it stands
 make patch                # rewrites patches/9000 from src/ after an edit there
 ```
 
@@ -72,13 +74,14 @@ overflowed rounding up to whole blocks, fixed and kept as a seed.
 
 | Path | What |
 | --- | --- |
-| `PROTOCOL.md` | The wire protocol between FFmpeg and the process that serves its reads. |
+| `ffstreamer-specification.md` | The protocol between FFmpeg and the process that serves its reads. |
+| `DESIGN.md` | Why the protocol is as it is: rationale, FFmpeg's internals, testing, measurements, open questions. |
 | `ffstreamer.dogma` | The protocol's wire format, in [Dogma](https://github.com/kstenerud/dogma). |
 | `patches/` | The patches, appended to jellyfin-ffmpeg's own `debian/patches/series`. |
 | `src/` | The protocol's source, from which `patches/9000` is made. |
 | `checkout.sh`, `build.sh`, `Makefile`, `JELLYFIN_TAG` | Building the patched FFmpeg (above). |
 | `fuzz/` | The fuzz harness of FFmpeg's side, its build and its seeds. |
-| `tools/` | `check_patch.py` and `sync_patch.py`, and scripts for the development tree (`build_dev.sh`, and the edits it applies). |
+| `tools/` | `check_patch.py`, `check_spec.py` and `sync_patch.py`, and scripts for the development tree (`build_dev.sh`, and the edits it applies). |
 | `.github/workflows/` | CI and releases (below). |
 | `bench/` | The measurements behind the protocol's choices, and the scripts that make them. |
 | `audits/` | The audits of each draft. |

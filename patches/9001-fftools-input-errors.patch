@@ -5,7 +5,7 @@
      }
  
 +    /* An input whose reads failed fails the run, where it would otherwise end
-+     * as if the input had simply ended (ffstreamer, PROTOCOL.md section 10.3). */
++     * as if the input had simply ended (ffstreamer's specification, Exit Status). */
 +    if ((ret >= 0 || ret == AVERROR_EOF || ret == AVERROR_EXIT) &&
 +        f->ctx->pb && f->ctx->pb->error < 0 && f->ctx->pb->error != AVERROR(EAGAIN)) {
 +        ret = f->ctx->pb->error == AVERROR_EXIT ? AVERROR(EINTR) : f->ctx->pb->error;
@@ -35,7 +35,7 @@
  
  finish:
 +    /* An interrupt during the opening of an input never reaches transcode(); a
-+     * signal must still exit non-zero (ffstreamer, PROTOCOL.md section 10.3). */
++     * signal must still exit non-zero (ffstreamer's specification, Exit Status). */
      if (ret == AVERROR_EXIT)
 -        ret = 0;
 +        ret = received_nb_signals ? 255 : 0;
@@ -48,7 +48,7 @@
      }
  
  end:
-+    /* A read that failed is not the input ending (ffstreamer, PROTOCOL.md section 10.3). */
++    /* A read that failed is not the input ending (ffstreamer's specification, Exit Status). */
 +    if (ret >= 0 && ifile.fmt_ctx && ifile.fmt_ctx->pb &&
 +        ifile.fmt_ctx->pb->error < 0 && ifile.fmt_ctx->pb->error != AVERROR(EAGAIN)) {
 +        ret = ifile.fmt_ctx->pb->error;
