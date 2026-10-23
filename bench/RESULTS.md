@@ -147,3 +147,36 @@ prepare, 2.42 to 13.13), and neither finishes the 25-track prepare.
 know how many the film has), or a policy that knows FFmpeg reads from one place per track (a block
 or two kept per region read). Until then a parent's budget kills a run that thrashes, so such a
 film fails to prepare rather than read gigabytes.
+
+## ffstreamer counted as a local protocol
+
+The thrash above wasn't the cache's: through ffstreamer, FFmpeg asked for 16 MB at a time and read
+straight through the bytes between tracks (a trace of the 11-track probe: 236 reads of 16,776,602
+bytes, where reading the file directly made 952 of 32,768 and touched 12 blocks of 1 MiB). When FFmpeg
+opens an indexed file, `ff_configure_buffers_for_index` takes any protocol but `file`, `pipe` and
+`cache` for a network one, enlarges its buffer up to 16 MiB, and reads forward rather than seek up to
+8 MiB. The patch now names ffstreamer among the local protocols. The same films and runs with the
+patched release build, bytes served over the film's size:
+
+| Film | Tracks | Run | 1 MiB × 8 | × 16 | × 24 | × 32 | × 48 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| one region each | 4 | probe | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
+| one region each | 4 | read-through | 0.97 | 0.97 | 0.97 | 0.97 | 0.97 |
+| one region each | 4 | prepare, every track | 1.09 | 1.05 | 1.02 | 1.02 | 1.02 |
+| one region each | 11 | probe | 0.10 | 0.10 | 0.10 | 0.10 | 0.10 |
+| one region each | 11 | read-through | 0.77 | 0.76 | 0.76 | 0.76 | 0.76 |
+| one region each | 11 | prepare, every track | 1,165.58 | 1.19 | 1.19 | 1.19 | 1.13 |
+| one region each | 17 | probe | 7.96 | 0.11 | 0.11 | 0.11 | 0.11 |
+| one region each | 17 | read-through | 8.51 | 0.65 | 0.65 | 0.65 | 0.65 |
+| one region each | 17 | prepare, every track | 1,491.58 | 19.79 | 1.33 | 1.33 | 1.33 |
+| one region each | 25 | probe | 3.14 | 0.10 | 0.10 | 0.10 | 0.10 |
+| one region each | 25 | read-through | 3.57 | 0.52 | 0.52 | 0.52 | 0.52 |
+| one region each | 25 | prepare, every track | timeout | timeout | 28.81 | 1.38 | 1.33 |
+| interleaved | 11 | prepare, every track | 1.02 | 1.02 | 1.02 | 1.02 | 1.02 |
+
+Chunks and subtitles follow their film's probe; the interleaved film's other runs are as before.
+
+**What this shows:** from 16 blocks every run but a prepare reads a tenth of the film or less, a
+third of what it read before; a prepare mapping every track needs about a block for each track's
+region, and a few more; and least-recently-used eviction still falls off its cliff below that. FFmpeg's
+default is now 32 blocks.

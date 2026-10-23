@@ -747,7 +747,7 @@
 +static const AVOption ffstreamer_options[] = {
 +    { "ffstreamer_read_fd",      "the descriptor the parent's messages arrive on", OFFSET(read_fd),      AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, D },
 +    { "ffstreamer_write_fd",     "the descriptor this side's messages go out on",  OFFSET(write_fd),     AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, D },
-+    { "ffstreamer_cache_blocks", "how many blocks to keep",                         OFFSET(cache_blocks), AV_OPT_TYPE_INT, { .i64 = 8 },   2,  1024,    D },
++    { "ffstreamer_cache_blocks", "how many blocks to keep",                         OFFSET(cache_blocks), AV_OPT_TYPE_INT, { .i64 = 32 },  2,  1024,    D },
 +    { NULL }
 +};
 +
@@ -820,3 +820,16 @@
  bluray_protocol_deps="libbluray"
  ffrtmpcrypt_protocol_conflict="librtmp_protocol"
  ffrtmpcrypt_protocol_deps_any="gcrypt gmp openssl mbedtls"
+--- a/libavformat/seek.c
++++ b/libavformat/seek.c
+@@ -189,7 +189,9 @@
+                "optimally without knowing the protocol\n");
+     }
+ 
+-    if (proto && !(strcmp(proto, "file") && strcmp(proto, "pipe") && strcmp(proto, "cache")))
++    /* ffstreamer is local too: its parent serves any offset, so a seek costs nothing, and reading
++     * forward in place of one would read megabytes it never needed. */
++    if (proto && !(strcmp(proto, "file") && strcmp(proto, "pipe") && strcmp(proto, "cache") && strcmp(proto, "ffstreamer")))
+         return;
+ 
+     for (unsigned ist1 = 0; ist1 < s->nb_streams; ist1++) {

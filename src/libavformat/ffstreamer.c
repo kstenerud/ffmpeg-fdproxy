@@ -744,7 +744,7 @@ static int ffstreamer_close(URLContext *h)
 static const AVOption ffstreamer_options[] = {
     { "ffstreamer_read_fd",      "the descriptor the parent's messages arrive on", OFFSET(read_fd),      AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, D },
     { "ffstreamer_write_fd",     "the descriptor this side's messages go out on",  OFFSET(write_fd),     AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, D },
-    { "ffstreamer_cache_blocks", "how many blocks to keep",                         OFFSET(cache_blocks), AV_OPT_TYPE_INT, { .i64 = 8 },   2,  1024,    D },
+    { "ffstreamer_cache_blocks", "how many blocks to keep",                         OFFSET(cache_blocks), AV_OPT_TYPE_INT, { .i64 = 32 },  2,  1024,    D },
     { NULL }
 };
 

@@ -31,8 +31,9 @@ Version 1 of the protocol. The specification went through six drafts and four au
   ([audits/2026-10-22-draft-5-review.md](audits/2026-10-22-draft-5-review.md)), which judged it ready
   to implement.
 * **Since implementing it:** the file size is bounded at 2^62, after a long fuzz found an overflow
-  near the top of int64; the measurements of the block cache replaced a formula that was wrong; and
-  the specification was restructured, its rationale moved here.
+  near the top of int64; measuring the block cache found FFmpeg taking ffstreamer for a network
+  protocol, now counted as local, and replaced a formula that was wrong; and the specification was
+  restructured, its rationale moved here.
 
 **What draft 5 changed from draft 4:**
 
@@ -142,6 +143,7 @@ Two patches, after jellyfin-ffmpeg's own series (`debian/patches/series`, applie
 | ----------------------------------------------------- | ----------------------------------------------- |
 | `libavformat/ffstreamer.c` (new; from `src/`)         | the protocol                                    |
 | `libavformat/protocols.c`, `Makefile`, `configure`    | one line each, registering it; `configure`'s `ffstreamer_protocol_deps` drops it on builds without POSIX pipes (win64) |
+| `libavformat/seek.c`                                  | one name added to the protocols FFmpeg treats as local ([The Block Cache](#the-block-cache)) |
 | `fftools/ffmpeg_demux.c`, `ffmpeg.c`, `ffprobe.c`     | the exit status of a failed read, about 15 lines |
 
 jellyfin's configure has no `--disable-everything`, so the protocol is built by default. There are
@@ -154,23 +156,39 @@ The Block Cache
 ---------------
 
 FFmpeg's side keeps the last `cache_blocks` blocks it was sent, and evicts the least recently used.
-Measured in [bench/RESULTS.md](bench/RESULTS.md) (`bench/interleave.py`):
+Measured in [bench/RESULTS.md](bench/RESULTS.md) (`bench/interleave.py`), on five-minute films of 4 to
+25 tracks, each track stored in one region of its own, and one interleaved.
 
-* **An interleaved file never thrashes,** at any size measured: about once through.
-* **A file whose tracks are stored one after another thrashes when the cache is short of what FFmpeg
-  sweeps,** and it falls off a cliff: an 11-track film was served 25 times its size at 24 blocks of
-  1 MiB, and a third of it at 48. The cause is a cycle a little larger than the cache, the worst case
-  for least-recently-used eviction.
-* **What a file needs follows its layout in bytes, not its count of tracks,** and the bytes kept
-  matter, not the blocks.
-* **A run mapping every track needs about two blocks for each:** a 25-track prepare thrashed at every
-  size measured.
-* **The earlier formula, 1.5 × the streams the run reads + 2, was wrong twice:** a run reads every
-  track while FFmpeg opens a file, whatever it maps, and two blocks a track are the least.
-* **Random eviction is no fix:** it softens the cliff, but costs up to five times as much where
-  least-recently-used fits.
+**The first measurements found the cache thrashing, and the cache wasn't the cause.** An 11-track
+film was served 25 times its size at 24 blocks of 1 MiB, and a prepare of a 25-track one thrashed at
+every size measured. A trace of FFmpeg's reads showed why: through ffstreamer, FFmpeg asked for 16 MB
+at a time, and read straight through the bytes between the tracks it wanted, where reading the same
+file directly it touched 12 blocks. When FFmpeg opens an indexed file, `ff_configure_buffers_for_index`
+(`libavformat/seek.c`) takes any protocol but `file`, `pipe` and `cache` for a network one, where a
+seek costs a round trip: it enlarges the I/O buffer up to 16 MiB and has every seek of less than up to
+8 MiB read forward instead. Through ffstreamer, whose seeks cost nothing, every hop between tracks
+read megabytes, and swept them through the cache.
 
-The parent's budget kills a run that thrashes, so such a file fails rather than reads gigabytes.
+**Counting ffstreamer as local fixes it** (one line in the patch). Measured again, with the patched
+release build:
+
+* a probe, a read-through, a chunk or a subtitle reads a tenth of the film or less from 16 blocks,
+  on every film, against a third or more before;
+* a prepare mapping every track needs about a block for each track's region and a few more: 16
+  blocks for 11 tracks, 24 for 17, 32 for 25, where it reads the film about 1.1 to 1.4 times;
+* an interleaved film needs a few blocks, at any count of tracks.
+
+**What remains** is least-recently-used eviction's own cliff: a prepare mapping more tracks than the
+cache has blocks is served the film many times over, and a parent's budget stops it. Random eviction,
+also measured, softens that cliff but costs up to five times as much where least-recently-used fits,
+so it is no fix.
+
+**How many tracks films have** (5,162 files of one household's library): a median of 3; at the 99th
+percentile, 44, nearly all subtitles in Matroska remuxes, with up to 49 subtitle tracks and 44 font
+attachments, but never more than 3 sound tracks. Matroska interleaves its tracks by design, and its
+attachments aren't read as packets; the MP4 and MOV files, the containers whose tracks can be stored
+one after another, have at most 10. So FFmpeg's default of 32 blocks, and a parent's of 48, cover any
+film but a badly muxed MP4 with dozens of tracks, which the budget stops.
 
 
 
@@ -219,6 +237,5 @@ one `READ` outstanding against two.
 Open Questions
 --------------
 
-* **The block cache's size and policy** ([The Block Cache](#the-block-cache)): a cache sized from the
-  file's tracks, which the parent must then know, or a policy that keeps a block or two for each
-  region FFmpeg reads.
+* **A cache sized for each run:** a parent that knows how many tracks a run maps could size its cache
+  as that and a few more, so that no prepare thrashes. Nothing measured yet needs it.

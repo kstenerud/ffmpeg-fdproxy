@@ -208,7 +208,7 @@ Each input restricts itself to this protocol and names its channel:
 | ------------------------- | ---------------------------------------------------------------------------------------------- |
 | `-ffstreamer_read_fd`     | The descriptor FFmpeg reads the parent's messages from. Default -1.                           |
 | `-ffstreamer_write_fd`    | The descriptor FFmpeg writes its own messages to. Default -1.                                  |
-| `-ffstreamer_cache_blocks`| How many blocks FFmpeg's side keeps ([Reading in Blocks](#reading-in-blocks)), 2 to 1,024. Default 8. |
+| `-ffstreamer_cache_blocks`| How many blocks FFmpeg's side keeps ([Reading in Blocks](#reading-in-blocks)), 2 to 1,024. Default 32. |
 
 * The options are decoding options. An open with either descriptor left at -1 **MUST** fail.
 * The URL **MUST** be exactly `ffstreamer:`, with nothing after it, so a relative reference resolved
@@ -714,13 +714,18 @@ The protocol opens the channel ([Descriptors](#descriptors)) and makes the openi
   layer usually asks 32 KiB, but reads a packet larger than its buffer at full size, and grows its
   buffer while probing. A read **MAY** come back short; FFmpeg loops.
 * It **MUST NOT** set `max_packet_size`, which would change FFmpeg's own buffering.
+* **FFmpeg MUST treat the input as local,** as it treats `file`: a seek costs nothing, since the
+  parent serves any offset. FFmpeg assumes any protocol it doesn't know as local is a network one,
+  and when it opens an indexed file it then enlarges its buffer up to 16 MiB and reads forward
+  rather than seek up to 8 MiB, reading megabytes it never needs (`ff_configure_buffers_for_index`).
 
 **Sizing the cache.** FFmpeg reads a few seconds of every track while it opens a file, whatever the
-run maps, so a file whose tracks are stored one after another is read from as many places at once as
-it has tracks, and a run mapping every track keeps reading from all of them. A cache smaller than
-that thrashes: each block is evicted just before it is needed again. An interleaved file needs a few
-blocks. The parent **SHOULD** set `cache_blocks` for the files it serves; see
-[DESIGN.md](DESIGN.md#the-block-cache) for what has been measured.
+run maps, and a run mapping several tracks reads from each of them as it goes. In a file whose tracks
+are stored one after another, each track is a place of its own, and the cache **SHOULD** hold about a
+block for each place read at once, and a few more for prefetching: a cache smaller than that thrashes,
+each block evicted just before it is needed again. An interleaved file needs a few blocks. The parent
+**SHOULD** set `cache_blocks` for the files it serves; see [DESIGN.md](DESIGN.md#the-block-cache) for
+what has been measured.
 
 
 ### Seeking and End of File
