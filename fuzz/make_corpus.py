@@ -36,6 +36,8 @@ seeds = {
     # A size at the top of int64, against which rounding up to whole blocks must not overflow; the
     # long fuzz found that it did (2026-10-22).
     "size-near-int64-max": opening(size=2**63 - 1) + data(2, 0),
+    # The largest size a REQUEST may give (the specification's Checks Without Overflow), and so the most arithmetic headroom used.
+    "size-at-the-bound": opening(size=2**62) + data(2, 0),
 }
 os.makedirs(os.path.join(here, "corpus"), exist_ok=True)
 for name, seed in seeds.items():

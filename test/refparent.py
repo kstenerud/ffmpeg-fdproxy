@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The reference parent of ffstreamer (PROTOCOL.md, draft 6): it serves a file to an
+"""The reference parent of ffstreamer (ffstreamer-specification.md, version 1): it serves a file to an
 ffmpeg or ffprobe over two pipes, checks every frame the child sends, and can misbehave
 on purpose, to test the child's side.
 
@@ -141,7 +141,9 @@ class Parent:
         longest = self.args.longest or block
         allowed = min(outstanding, self.args.outstanding)
         run = self.args.run
-        self.terms = (version, run, self.size, block, longest, allowed)
+        # --size lies about the file's size, to test FFmpeg's side against a REQUEST past the bound.
+        self.terms = (version, run, self.args.size if self.args.size is not None else self.size, block, longest,
+                      allowed)
         self.write(self.frame(REQUEST, sequence, struct.pack("<hqqiib", *self.terms)))
 
     # --- serving -----------------------------------------------------------------
@@ -297,6 +299,7 @@ def main():
     parser.add_argument("--wrong-number-at", type=int)
     parser.add_argument("--short-at", type=int)
     parser.add_argument("--budget", type=int)
+    parser.add_argument("--size", type=int, help="the file size REQUEST gives, in place of the file's")
     parser.add_argument("--kill-after-ms", type=int)
     parser.add_argument("--signal-after-ms", type=int)
     parser.add_argument("--signal", type=int, default=15)

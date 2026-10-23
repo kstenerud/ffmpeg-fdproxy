@@ -101,6 +101,7 @@ class Suite:
         case("a wrong sequence number: PROTOCOL, non-zero exit", ends("PROTOCOL"), "--wrong-number-at", "10")
         case("a short DATA: PROTOCOL, non-zero exit", ends("PROTOCOL"), "--short-at", "10")
         case("terms outside the capability: TERMS, non-zero exit", ends("TERMS"), "--block", str(64 << 20))
+        case("a file size past 2^62: TERMS, non-zero exit", ends("TERMS"), "--size", str((1 << 62) + 1))
         case("no shared version: killed, no DONE", killed_without_done, "--versions", "2:3")
         case("the parent stalls and kills: no DONE, non-zero exit", killed_without_done,
              "--stall-after", "5", "--kill-after-ms", "3000")

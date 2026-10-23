@@ -1,7 +1,7 @@
 /*
  * ffstreamer: reads an input whose every byte a parent process serves over
- * two inherited pipes, by offset. See PROTOCOL.md in the ffmpeg-ffstreamer
- * repository, draft 6.
+ * two inherited pipes, by offset. See ffstreamer-specification.md in the
+ * ffmpeg-ffstreamer repository, version 1.
  *
  * This file is part of FFmpeg.
  *
@@ -55,6 +55,10 @@
 #define FFS_PREFERRED_BLOCK  (1 << 20)
 #define FFS_LARGEST_BODY     (4 << 20)
 #define FFS_OUTSTANDING_CAP  2
+
+/* The largest file size a REQUEST may give (the specification's Checks Without Overflow): headroom, so the size plus a block, a
+ * READ or a seek from the end stays below INT64_MAX. */
+#define FFS_LARGEST_FILE     (INT64_C(1) << 62)
 
 enum FFStreamerType {
     FFS_HELLO      = 1,
@@ -426,7 +430,7 @@ static int receive_request(URLContext *h, int version, int8_t capability_sequenc
         ret = AVERROR(EPROTO);
         goto end;
     }
-    if (request_version != version || c->run < 1 ||
+    if (request_version != version || c->run < 1 || c->size > FFS_LARGEST_FILE ||
         c->block < 1 || c->block > FFS_LARGEST_BODY ||
         c->longest < c->block || c->longest > FFS_LARGEST_BODY ||
         c->outstanding_allowed < 1 || c->outstanding_allowed > FFS_OUTSTANDING_CAP) {
@@ -615,7 +619,7 @@ static int receive_data(URLContext *h)
 
     if ((ret = read_header(h, FFS_DATA, oldest->sequence, oldest->length, NULL)) < 0)
         goto fault;
-    /* The slot is freed no earlier than reading the DATA header (PROTOCOL.md §7.4). */
+    /* The slot is freed no earlier than reading the DATA header (the specification's READ). */
     c->outstanding_first = (c->outstanding_first + 1) % FFS_MAX_OUTSTANDING;
     c->outstanding_count--;
     if ((ret = read_exact(h, c->blocks[oldest->slot].data, oldest->length)) < 0)
