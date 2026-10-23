@@ -52,9 +52,9 @@ def protocol(tree):
            "extern const URLProtocol ff_ffstreamer_protocol;\n")
     insert(tree, "libavformat/Makefile", "OBJS-$(CONFIG_FFRTMPHTTP_PROTOCOL)       += rtmphttp.o\n",
            "OBJS-$(CONFIG_FFSTREAMER_PROTOCOL)       += ffstreamer.o\n")
-    insert(tree, "configure", "\n    setrlimit\n", "    sigtimedwait\n")
+    insert(tree, "configure", "\n    siglongjmp\n", "    sigtimedwait\n")
     insert(tree, "configure", 'ffrtmphttp_protocol_select="http_protocol"\n',
-           'ffstreamer_protocol_deps="poll_h sigtimedwait threads"\n')
+           'ffstreamer_protocol_deps="poll_h pthreads sigtimedwait"\n')
     insert(tree, "configure", "check_func  setrlimit\n", "check_func_headers signal.h sigtimedwait\n")
     insert(tree, "doc/protocols.texi", "@section file\n", read("upstream/protocols.texi"), before=True)
     insert(tree, "Changelog", "version <next>:\n", "- ffstreamer protocol\n")
@@ -75,7 +75,7 @@ def fate(tree):
     copy(tree, "src/libavformat/tests/ffstreamer.c", "libavformat/tests/ffstreamer.c")
     copy(tree, "src/tests/ref/fate/ffstreamer", "tests/ref/fate/ffstreamer")
     insert(tree, "libavformat/Makefile", "TESTPROGS-$(CONFIG_FFRTMPCRYPT_PROTOCOL) += rtmpdh\n",
-           "TESTPROGS-$(CONFIG_FFSTREAMER_PROTOCOL) += ffstreamer\n", before=True)
+           "TESTPROGS-$(CONFIG_FFSTREAMER_PROTOCOL)  += ffstreamer\n")
     insert(tree, "tests/fate/libavformat.mak", "FATE_LIBAVFORMAT-$(CONFIG_FFRTMPCRYPT_PROTOCOL) += fate-rtmpdh\n",
            "FATE_LIBAVFORMAT-$(CONFIG_FFSTREAMER_PROTOCOL) += fate-ffstreamer\n"
            "fate-ffstreamer: libavformat/tests/ffstreamer$(EXESUF)\n"
@@ -93,6 +93,12 @@ def seek(tree):
 
 
 def demux(tree):
+    replace(tree, "fftools/ffmpeg_demux.c",
+            "            if (d->loop) {\n",
+            "            /* An input whose reads failed is not looped: it would fail\n"
+            "             * again at once, for ever. */\n"
+            "            if (d->loop && !(f->ctx->pb && f->ctx->pb->error < 0 &&\n"
+            "                             f->ctx->pb->error != AVERROR(EAGAIN))) {\n")
     insert(tree, "fftools/ffmpeg_demux.c",
            "    // EOF/EXIT is normal termination\n    if (ret == AVERROR_EOF || ret == AVERROR_EXIT)\n",
            "    /* An input whose reads failed fails the run, where it would otherwise\n"
@@ -138,6 +144,8 @@ def probe(tree):
             "        ifile.fmt_ctx->pb->error < 0 &&\n"
             "        ifile.fmt_ctx->pb->error != AVERROR(EAGAIN)) {\n"
             "        ret = ifile.fmt_ctx->pb->error;\n"
+            "        if (ret == AVERROR_EXIT)\n"
+            "            ret = AVERROR(EINTR);\n"
             '        av_log(NULL, AV_LOG_ERROR, "Reading the input failed: %s\\n",\n'
             "               av_err2str(ret));\n"
             "    }\n"
@@ -162,8 +170,9 @@ before use; FFmpeg's side trusts the parent, and the parent trusts
 nothing FFmpeg sends. Its specification:
 https://github.com/kstenerud/ffmpeg-ffstreamer
 
-It needs poll() and sigtimedwait(), which it waits on in slices so
-the interrupt callback is honoured, so it is built where both exist.
+It needs poll(), pthreads and sigtimedwait(), so it is built on Linux
+and the BSDs that have it, not on macOS or OpenBSD, which lack
+sigtimedwait().
 """),
     (fate, """fate/libavformat: add a test of the ffstreamer protocol
 
@@ -179,10 +188,18 @@ needed.
 """),
     (demux, """fftools/ffmpeg_demux: fail when reading an input failed
 
-An input whose reads failed ended as if the input had simply ended, and
-ffmpeg exited 0 with a truncated output. A read error left in the
-input's AVIOContext now fails the run, after the input ends and while
-its streams are probed.
+Without -xerror, an error while demuxing is logged and the input ends
+with status 0, so a run whose input could not be read through exits 0
+with a truncated output. That suits a stream that may break; it does
+not suit a file read for a measurement or an encode, which the caller
+must not take as whole. -xerror is no way out, since it also ends the
+run on a decode error that would have been concealed.
+
+A read error left in the input's AVIOContext, an I/O failure rather
+than a damaged stream, now fails the run, after the input ends and
+while its streams are probed. An input whose reads failed is not
+looped by -stream_loop either: it seeked back and failed again at
+once, for ever, with -xerror or without.
 """),
     (signal_exit, """fftools/ffmpeg: exit non-zero when a signal interrupts opening an input
 

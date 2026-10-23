@@ -233,7 +233,8 @@ Each input restricts itself to this protocol and names its channel:
 
 **FFmpeg's side, on open**:
 
-* **MUST** set `FD_CLOEXEC` on both descriptors;
+* **MUST** set `FD_CLOEXEC` on both descriptors, and clear `O_NONBLOCK`, so a full pipe waits
+  rather than failing;
 * **MUST** check that each is a FIFO opened for its direction;
 * **MUST** refuse to be opened for writing.
 
@@ -245,6 +246,11 @@ parent-to-FFmpeg pipe is already open in the process, through whichever descript
 **MUST** close both its descriptors when the session closes, so no later open reaches that pipe
 again through them: unread `DATA` may still be in it. It knows a pipe by `fstat`'s device and inode,
 not by descriptor number, which the process reuses for new pipes.
+
+**The descriptors are the session's from the open.** An open that fails **MUST** close both, so the
+caller knows where they stand from the outcome alone, except one refused because its pipe already
+serves a session (`EBUSY`), which **MUST** leave them untouched: they may be that session's own. So
+that this holds, FFmpeg's side checks the claim before anything else that can fail.
 
 
 ### Pipe Sizes
@@ -853,7 +859,8 @@ Full Example
 ------------
 
 FFmpeg reads a 2,500,000-byte file straight through, as run 7, in blocks of 1 MiB with two `READ`s
-outstanding.
+outstanding. Its first block follows none, so only its second asks for the third ahead
+([Prefetching](#prefetching)).
 
 **FFmpeg's side → parent**, then **parent → FFmpeg's side**, in the order the frames are sent:
 
@@ -869,12 +876,12 @@ outstanding.
       00 00 10 00  00 00 10 00  02                  //   block 1 MiB, longest READ 1 MiB, 2 outstanding
 →  04 02 0c 00 00 00                                // READ 2
       00 00 00 00 00 00 00 00  00 00 10 00          //   bytes 0 to 1,048,575
-→  04 03 0c 00 00 00                                // READ 3 (prefetch)
-      00 00 10 00 00 00 00 00  00 00 10 00          //   bytes 1,048,576 to 2,097,151
 ←  05 02 00 00 10 00  ...                           // DATA 2: 1,048,576 bytes
-←  05 03 00 00 10 00  ...                           // DATA 3: 1,048,576 bytes
-→  04 04 0c 00 00 00                                // READ 4
+→  04 03 0c 00 00 00                                // READ 3: the next block, read straight on
+      00 00 10 00 00 00 00 00  00 00 10 00          //   bytes 1,048,576 to 2,097,151
+→  04 04 0c 00 00 00                                // READ 4 (prefetch)
       00 00 20 00 00 00 00 00  a0 25 06 00          //   bytes 2,097,152 to the end: 402,848
+←  05 03 00 00 10 00  ...                           // DATA 3: 1,048,576 bytes
 ←  05 04 a0 25 06 00  ...                           // DATA 4: 402,848 bytes
 →  06 05 09 00 00 00                                // DONE 5
       07 00 00 00 00 00 00 00  00                   //   run 7, OK

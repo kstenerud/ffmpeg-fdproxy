@@ -1,6 +1,6 @@
 --- a/libavformat/ffstreamer.c
 +++ b/libavformat/ffstreamer.c
-@@ -0,0 +1,883 @@
+@@ -0,0 +1,901 @@
 +/*
 + * ffstreamer: reads an input whose every byte a parent process serves over
 + * two inherited pipes, by offset. See ffstreamer-specification.md in the
@@ -80,58 +80,58 @@
 +    FFS_KIND_INTERRUPTED = 4,
 +};
 +
++/** One block of the file in the cache. */
 +typedef struct FFStreamerBlock {
-+    int64_t index;      /* the block's number in the file, or -1 when free */
-+    int32_t length;
-+    int64_t last_used;
-+    int     pending;    /* its READ is outstanding */
-+    uint8_t *data;
++    int64_t index;      ///< the block's number in the file, or -1 when free
++    int32_t length;     ///< its length: the block size, or less for the last
++    int64_t last_used;  ///< when it was last read, by the session's use_clock
++    int     pending;    ///< its READ is outstanding
++    uint8_t *data;      ///< its bytes, the block size allocated
 +} FFStreamerBlock;
 +
++/** A READ sent and not yet answered. */
 +typedef struct FFStreamerOutstanding {
-+    int8_t  sequence;
-+    int64_t offset;
-+    int32_t length;
-+    int     slot;
++    int8_t  sequence;   ///< the READ's number, which its DATA carries
++    int64_t offset;     ///< where in the file it starts
++    int32_t length;     ///< how many bytes it asked for
++    int     slot;       ///< the cache block its DATA goes into
 +} FFStreamerOutstanding;
 +
 +typedef struct FFStreamerContext {
 +    const AVClass *class;
-+    int read_fd;
-+    int write_fd;
-+    int cache_blocks;
++    int read_fd;        ///< where the parent's messages arrive
++    int write_fd;       ///< where this side's messages go
++    int cache_blocks;   ///< how many blocks the cache holds
 +
-+    /* The terms, from REQUEST. */
-+    int     accepted;
-+    int64_t run;
-+    int64_t size;
-+    int32_t block;
-+    int32_t longest;
-+    int8_t  outstanding_allowed;
++    int     accepted;   ///< REQUEST's terms were taken
++    int64_t run;        ///< the parent's number for the run, from REQUEST
++    int64_t size;       ///< the file's size, from REQUEST
++    int32_t block;      ///< the block size, from REQUEST
++    int32_t longest;    ///< the longest READ, from REQUEST
++    int8_t  outstanding_allowed; ///< READs that may be outstanding at once
 +
-+    AVMutex lock;       /* over numbering and writing a frame */
-+    int8_t  next_sequence;
++    AVMutex lock;       ///< held over numbering and writing a frame
++    int8_t  next_sequence; ///< the number the next frame sent takes
 +
-+    FFStreamerBlock *blocks;
-+    int64_t use_clock;
++    FFStreamerBlock *blocks; ///< the cache, cache_blocks of them
++    int64_t use_clock;  ///< counts reads, to find the least recently used
 +
++    /** The READs sent and not yet answered, oldest first, as a ring. */
 +    FFStreamerOutstanding outstanding[FFS_MAX_OUTSTANDING];
-+    int outstanding_first;
-+    int outstanding_count;
++    int outstanding_first; ///< the oldest's place in the ring
++    int outstanding_count; ///< how many there are
 +
-+    int64_t position;
-+    int64_t last_needed;
++    int64_t position;   ///< where the next read starts
++    int64_t last_needed; ///< the block the last read needed, for prefetch
 +
-+    int fault;          /* a sticky AVERROR, 0 while healthy */
-+    int fault_kind;
-+    int done_sent;
++    int fault;          ///< a sticky AVERROR, 0 while healthy
++    int fault_kind;     ///< DONE's kind for the fault
++    int done_sent;      ///< DONE has been sent
 +
-+    /* The pipe the parent's messages arrive on, claimed while the session
-+     * is open. */
-+    int     claimed;
-+    dev_t   claimed_device;
-+    ino_t   claimed_inode;
-+    struct FFStreamerContext *next_claim;
++    int     claimed;    ///< the parent's pipe is claimed for this session
++    dev_t   claimed_device; ///< the claimed pipe's device
++    ino_t   claimed_inode;  ///< the claimed pipe's inode
++    struct FFStreamerContext *next_claim; ///< the next session claimed
 +} FFStreamerContext;
 +
 +/* The sessions open in this process, by the pipe the parent's messages
@@ -416,7 +416,11 @@
 +
 +/* --- Opening ------------------------------------------------------------ */
 +
-+/** Checks that fd is a pipe open for access_mode, and sets FD_CLOEXEC. */
++/**
++ * Checks that fd is a pipe open for access_mode, sets FD_CLOEXEC, and clears
++ * O_NONBLOCK, so a full pipe waits rather than failing with EAGAIN, which
++ * this protocol never returns.
++ */
 +static int check_descriptor(URLContext *h, int fd, int access_mode)
 +{
 +    struct stat facts;
@@ -435,7 +439,8 @@
 +        ret = AVERROR(EBADF);
 +        goto end;
 +    }
-+    if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0)
++    if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0 ||
++        ((flags & O_NONBLOCK) && fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) < 0))
 +        ret = AVERROR(errno);
 +end:
 +    return ret;
@@ -552,27 +557,31 @@
 +    FFStreamerContext *c = h->priv_data;
 +    uint8_t body[9];
 +    int8_t capability_sequence;
++    int64_t blocks_in_file;
 +    int version, ret;
 +
-+    /* Until the channel is claimed, its descriptors are not ours to close. */
-+    if (strcmp(url, "ffstreamer:")) {
-+        av_log(h, AV_LOG_ERROR,
-+               "ffstreamer: the URL must be exactly \"ffstreamer:\"\n");
-+        ret = AVERROR(EINVAL);
-+        goto unclaimed;
-+    }
-+    if (flags & AVIO_FLAG_WRITE) {
-+        ret = AVERROR(EINVAL);
-+        goto unclaimed;
-+    }
++    /* The descriptors are the session's from here: an open that fails
++     * closes them, but for a pipe that serves another session already,
++     * whose descriptors may be that session's own, which it leaves alone.
++     * So the claim is checked before anything else can fail. */
 +    if (c->read_fd < 0 || c->write_fd < 0) {
 +        av_log(h, AV_LOG_ERROR, "ffstreamer: -ffstreamer_read_fd and "
 +               "-ffstreamer_write_fd are required\n");
 +        ret = AVERROR(EINVAL);
-+        goto unclaimed;
++        goto fail;
 +    }
 +    if ((ret = claim_channel(h)) < 0)
-+        goto unclaimed;
++        goto refused;
++    if (strcmp(url, "ffstreamer:")) {
++        av_log(h, AV_LOG_ERROR,
++               "ffstreamer: the URL must be exactly \"ffstreamer:\"\n");
++        ret = AVERROR(EINVAL);
++        goto fail;
++    }
++    if (flags & AVIO_FLAG_WRITE) {
++        ret = AVERROR(EINVAL);
++        goto fail;
++    }
 +    if ((ret = check_descriptor(h, c->read_fd, O_RDONLY)) < 0 ||
 +        (ret = check_descriptor(h, c->write_fd, O_WRONLY)) < 0)
 +        goto fail;
@@ -600,6 +609,11 @@
 +        goto fail;
 +    }
 +
++    /* No more blocks than the file has, but room for every READ that may
++     * be outstanding and the block being read. */
++    blocks_in_file = c->size / c->block + !!(c->size % c->block);
++    if (c->cache_blocks > blocks_in_file)
++        c->cache_blocks = (int)FFMAX(blocks_in_file, 1);
 +    if (c->cache_blocks < c->outstanding_allowed + 1)
 +        c->cache_blocks = c->outstanding_allowed + 1;
 +    c->blocks = av_calloc(c->cache_blocks, sizeof(*c->blocks));
@@ -627,7 +641,11 @@
 +    free_cache(c);
 +    close_descriptors(c);
 +    goto end;
-+unclaimed:
++refused:
++    /* Another session's pipe is left to that session; a descriptor that is
++     * no pipe was given to this one, and goes. */
++    if (ret != AVERROR(EBUSY))
++        close_descriptors(c);
 +    c->read_fd = c->write_fd = -1;
 +end:
 +    return ret;
@@ -918,7 +936,7 @@
  ffrtmpcrypt_protocol_select="tcp_protocol"
  ffrtmphttp_protocol_conflict="librtmp_protocol"
  ffrtmphttp_protocol_select="http_protocol"
-+ffstreamer_protocol_deps="poll_h sigtimedwait threads"
++ffstreamer_protocol_deps="poll_h pthreads sigtimedwait"
  ftp_protocol_select="tcp_protocol"
  gopher_protocol_select="tcp_protocol"
  gophers_protocol_select="tls_protocol"

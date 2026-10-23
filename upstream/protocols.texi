@@ -12,6 +12,12 @@ hands FFmpeg one end of each, and names them with the options below. The URL is
 exactly @code{ffstreamer:}, with nothing after it. Reading only; each pipe
 serves one session at a time.
 
+The protocol takes the two descriptors when it is opened, and closes them when
+the session closes or the open fails; an open refused with @code{EBUSY},
+because the pipe serves another session already, leaves them as they were.
+
+It needs @code{sigtimedwait()}, so it is not built on macOS or OpenBSD.
+
 This protocol accepts the following options:
 
 @table @option

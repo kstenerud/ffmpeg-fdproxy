@@ -1,6 +1,18 @@
 --- a/fftools/ffmpeg_demux.c
 +++ b/fftools/ffmpeg_demux.c
-@@ -840,6 +840,17 @@
+@@ -786,7 +786,10 @@
+             ret_bsf = demux_bsf_flush(d, &dt);
+             ret = err_merge(ret == AVERROR_EOF ? 0 : ret, ret_bsf);
+ 
+-            if (d->loop) {
++            /* An input whose reads failed is not looped: it would fail
++             * again at once, for ever. */
++            if (d->loop && !(f->ctx->pb && f->ctx->pb->error < 0 &&
++                             f->ctx->pb->error != AVERROR(EAGAIN))) {
+                 /* signal looping to our consumers */
+                 dt.pkt_demux->stream_index = -1;
+                 ret = sch_demux_send(d->sch, f->index, dt.pkt_demux, 0);
+@@ -840,6 +843,17 @@
              break;
      }
  
@@ -18,7 +30,7 @@
      // EOF/EXIT is normal termination
      if (ret == AVERROR_EOF || ret == AVERROR_EXIT)
          ret = 0;
-@@ -2158,6 +2169,16 @@
+@@ -2158,6 +2172,16 @@
              if (ic->nb_streams == 0)
                  return ret;
          }
@@ -51,7 +63,7 @@
  
 --- a/fftools/ffprobe.c
 +++ b/fftools/ffprobe.c
-@@ -2731,6 +2731,14 @@
+@@ -2731,6 +2731,16 @@
      }
  
  end:
@@ -60,6 +72,8 @@
 +        ifile.fmt_ctx->pb->error < 0 &&
 +        ifile.fmt_ctx->pb->error != AVERROR(EAGAIN)) {
 +        ret = ifile.fmt_ctx->pb->error;
++        if (ret == AVERROR_EXIT)
++            ret = AVERROR(EINTR);
 +        av_log(NULL, AV_LOG_ERROR, "Reading the input failed: %s\n",
 +               av_err2str(ret));
 +    }
