@@ -812,14 +812,30 @@
  OBJS-$(CONFIG_GOPHERS_PROTOCOL)          += gopher.o
 --- a/configure
 +++ b/configure
-@@ -4043,6 +4043,7 @@
- android_content_protocol_deps="jni"
- android_content_protocol_select="file_protocol"
- async_protocol_deps="threads"
-+ffstreamer_protocol_deps="poll_h threads"
- bluray_protocol_deps="libbluray"
- ffrtmpcrypt_protocol_conflict="librtmp_protocol"
- ffrtmpcrypt_protocol_deps_any="gcrypt gmp openssl mbedtls"
+@@ -2556,6 +2556,7 @@
+     SetDllDirectory
+     setmode
+     setrlimit
++    sigtimedwait
+     Sleep
+     strerror_r
+     sysconf
+@@ -4049,6 +4050,7 @@
+ ffrtmpcrypt_protocol_select="tcp_protocol"
+ ffrtmphttp_protocol_conflict="librtmp_protocol"
+ ffrtmphttp_protocol_select="http_protocol"
++ffstreamer_protocol_deps="poll_h sigtimedwait threads"
+ ftp_protocol_select="tcp_protocol"
+ gopher_protocol_select="tcp_protocol"
+ gophers_protocol_select="tls_protocol"
+@@ -6985,6 +6987,7 @@
+ check_func_headers sys/prctl.h prctl
+ check_func  sched_getaffinity
+ check_func  setrlimit
++check_func_headers signal.h sigtimedwait
+ check_struct "sys/stat.h" "struct stat" st_mtim.tv_nsec -D_BSD_SOURCE
+ check_func  strerror_r
+ check_func  sysconf
 --- a/libavformat/seek.c
 +++ b/libavformat/seek.c
 @@ -189,7 +189,9 @@
