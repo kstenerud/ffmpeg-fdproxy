@@ -108,7 +108,13 @@ FFmpeg built the same way, and runs it on eight workers from the seeds in `fuzz/
 `make test-upstream` builds FFmpeg at `UPSTREAM_COMMIT` with the series and nothing else enabled, in
 Docker, fails on any warning in the series' files, builds the protocols manual, and runs
 `fate-ffstreamer`: `src/libavformat/tests/ffstreamer.c`, which serves a file from a thread over two
-pipes and reads it through the public avio API, against `src/tests/ref/fate/ffstreamer`.
+pipes and reads it through the public avio API, against `src/tests/ref/fate/ffstreamer`. It reads
+through, by seeks and at random through a cache of two blocks; meets a parent that leaves, stalls
+(ended by the interrupt), misnumbers a `DATA` (the fault sticks) or stops reading (SIGPIPE at its
+default); and checks the descriptors: made blocking, closed after a session and a failed open, left
+alone by an `EBUSY`. Each of these faults injected into the protocol fails it: LRU eviction made
+MRU, the sticky fault, the interrupt check, the sequence check or the SIGPIPE mask removed, a
+refused open's descriptors kept, `O_NONBLOCK` kept.
 
 ## Layout
 

@@ -1,5 +1,6 @@
 read:
 open: 0
+blocking: yes
 size: 100003
 read 100003 bytes, as served: yes
 seek to 50000: 50000
@@ -7,13 +8,39 @@ read 3000 bytes, as served: yes
 seek to 10 before the end: 99993
 read 10 bytes, as served: yes, at the end: 1
 DONE: ok
+its descriptors closed: yes
+random reads through a cache of two blocks:
+open: 0
+300 reads, as served: 300
+DONE: ok
 the parent leaves after 3 answers:
 open: 0
-read 12288 bytes, then failed: yes
+read 12288 bytes
+then failed: yes, interrupted: no
 DONE: err, kind 2
+the parent misnumbers its 4th DATA:
+open: 0
+read 12288 bytes
+then failed: yes, interrupted: no
+a read after it fails too: yes
+DONE: err, kind 3
+the parent stalls at once:
+open: 0
+read 0 bytes
+then failed: yes, interrupted: yes
+DONE: err, kind 4
+the parent stops reading after 3 answers:
+open: 0
+read 12288 bytes
+then failed: yes, interrupted: no
+DONE: none
 a REQUEST whose block is 0:
 open refused: yes
+its descriptors closed: yes
 DONE: err, kind 1
+descriptors that are no pipe:
+open refused: yes
+its descriptors closed: yes
 a second session on an open pipe:
 first open: 0
 second open refused: yes

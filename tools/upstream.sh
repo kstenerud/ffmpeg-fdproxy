@@ -51,5 +51,8 @@ make -j"$(nproc)" doc/ffmpeg-protocols.html > make.log 2>&1 || { grep -n -B2 -A6
 make -j"$(nproc)" libavformat/tests/ffstreamer > build.log 2>&1 || { grep -n -B2 -A6 -i error build.log | head -40; exit 1; }
 # The series adds no warning of its own to the build.
 if grep -A3 "ffstreamer[^ ]*: warning:" build.log make.log; then exit 1; fi
-make fate-ffstreamer SAMPLES= 2>&1 | tail -20
+# On a failure, what the test printed, whole: the reference to compare, or to write anew.
+make fate-ffstreamer SAMPLES= > fate.log 2>&1 || {
+    tail -5 fate.log; echo "--- what the test printed:"; cat tests/data/fate/ffstreamer; exit 1; }
+tail -1 fate.log
 '
