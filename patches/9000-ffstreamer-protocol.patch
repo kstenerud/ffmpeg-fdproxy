@@ -1,6 +1,6 @@
 --- a/libavformat/ffstreamer.c
 +++ b/libavformat/ffstreamer.c
-@@ -0,0 +1,820 @@
+@@ -0,0 +1,867 @@
 +/*
 + * ffstreamer: reads an input whose every byte a parent process serves over
 + * two inherited pipes, by offset. See ffstreamer-specification.md in the
@@ -59,8 +59,9 @@
 +#define FFS_LARGEST_BODY     (4 << 20)
 +#define FFS_OUTSTANDING_CAP  2
 +
-+/* The largest file size a REQUEST may give (the specification's Checks Without Overflow): headroom, so the size plus a block, a
-+ * READ or a seek from the end stays below INT64_MAX. */
++/* The largest file size a REQUEST may give (the specification's Checks
++ * Without Overflow): headroom, so the size plus a block, a READ or a seek
++ * from the end stays below INT64_MAX. */
 +#define FFS_LARGEST_FILE     (INT64_C(1) << 62)
 +
 +enum FFStreamerType {
@@ -125,18 +126,22 @@
 +    int fault_kind;
 +    int done_sent;
 +
-+    /* The pipe the parent's messages arrive on, claimed while the session is open. */
++    /* The pipe the parent's messages arrive on, claimed while the session
++     * is open. */
 +    int     claimed;
 +    dev_t   claimed_device;
 +    ino_t   claimed_inode;
 +    struct FFStreamerContext *next_claim;
 +} FFStreamerContext;
 +
-+/* The sessions open in this process, by the pipe the parent's messages arrive on: a pipe serves
-+ * one session at a time, through whichever descriptor reaches it. */
++/* The sessions open in this process, by the pipe the parent's messages
++ * arrive on: a pipe serves one session at a time, through whichever
++ * descriptor reaches it. */
 +static AVMutex claims_lock = AV_MUTEX_INITIALIZER;
 +static FFStreamerContext *claims;
 +
++/** Claims the session's pipe for as long as it is open: EBUSY when another
++ * open session has it, EBADF when the descriptor is not a pipe. */
 +static int claim_channel(URLContext *h)
 +{
 +    FFStreamerContext *c = h->priv_data;
@@ -144,14 +149,17 @@
 +    int ret = 0;
 +
 +    if (fstat(c->read_fd, &facts) < 0 || !S_ISFIFO(facts.st_mode)) {
-+        av_log(h, AV_LOG_ERROR, "ffstreamer: descriptor %d is not a pipe\n", c->read_fd);
++        av_log(h, AV_LOG_ERROR, "ffstreamer: descriptor %d is not a pipe\n",
++               c->read_fd);
 +        ret = AVERROR(EBADF);
 +        goto end;
 +    }
 +    ff_mutex_lock(&claims_lock);
 +    for (FFStreamerContext *other = claims; other; other = other->next_claim) {
-+        if (other->claimed_device == facts.st_dev && other->claimed_inode == facts.st_ino) {
-+            av_log(h, AV_LOG_ERROR, "ffstreamer: the channel on descriptor %d is open already\n",
++        if (other->claimed_device == facts.st_dev &&
++            other->claimed_inode == facts.st_ino) {
++            av_log(h, AV_LOG_ERROR,
++                   "ffstreamer: the channel on descriptor %d is open already\n",
 +                   c->read_fd);
 +            ret = AVERROR(EBUSY);
 +            goto unlock;
@@ -168,6 +176,7 @@
 +    return ret;
 +}
 +
++/** Lets the session's pipe go, if it was claimed. */
 +static void release_channel(FFStreamerContext *c)
 +{
 +    if (!c->claimed)
@@ -189,9 +198,9 @@
 +    return (int8_t)((sequence + 1) % 128);
 +}
 +
-+/* --- Writing --------------------------------------------------------------- */
++/* --- Writing ------------------------------------------------------------ */
 +
-+/* One write() of a whole frame, with SIGPIPE consumed rather than delivered,
++/** One write() of a whole frame, with SIGPIPE consumed rather than delivered,
 + * whatever the program's disposition. */
 +static int write_frame_locked(FFStreamerContext *c, uint8_t type,
 +                              const uint8_t *body, int32_t body_length,
@@ -202,7 +211,8 @@
 +    int was_pending, ret = 0;
 +    ssize_t written;
 +
-+    if (body_length < 0 || body_length > FFS_MAX_SENT_FRAME - FFS_HEADER_BYTES) {
++    if (body_length < 0 ||
++        body_length > FFS_MAX_SENT_FRAME - FFS_HEADER_BYTES) {
 +        ret = AVERROR(EINVAL);
 +        goto end;
 +    }
@@ -246,6 +256,7 @@
 +    return ret;
 +}
 +
++/** Numbers and writes a frame under the session's lock. */
 +static int write_frame(FFStreamerContext *c, uint8_t type, const uint8_t *body,
 +                       int32_t body_length, int8_t *sequence_out)
 +{
@@ -257,10 +268,11 @@
 +    return ret;
 +}
 +
-+/* --- Reading ---------------------------------------------------------------- */
++/* --- Reading ------------------------------------------------------------ */
 +
-+/* Reads exactly length bytes, waiting as long as the parent likes, in slices,
-+ * checking FFmpeg's interrupt between them. End-of-file is the channel ending. */
++/** Reads exactly length bytes, waiting as long as the parent likes, in
++ * slices, checking FFmpeg's interrupt between them. End-of-file is the
++ * channel ending. */
 +static int read_exact(URLContext *h, uint8_t *buffer, int64_t length)
 +{
 +    FFStreamerContext *c = h->priv_data;
@@ -278,7 +290,8 @@
 +            goto end;
 +        }
 +        if (ready <= 0) {
-+            /* A slice passed, or a signal came: see whether FFmpeg wants to stop. */
++            /* A slice passed, or a signal came: see whether FFmpeg wants
++             * to stop. */
 +            if (ff_check_interrupt(&h->interrupt_callback)) {
 +                ret = AVERROR_EXIT;
 +                goto end;
@@ -303,9 +316,10 @@
 +    return ret;
 +}
 +
-+/* Reads a header and checks its type, sequence and exact or bounded length. */
-+static int read_header(URLContext *h, uint8_t expected_type, int8_t expected_sequence,
-+                       int32_t expected_length, int32_t *length_out)
++/** Reads a header and checks its type, sequence and exact or bounded length. */
++static int read_header(URLContext *h, uint8_t expected_type,
++                       int8_t expected_sequence, int32_t expected_length,
++                       int32_t *length_out)
 +{
 +    uint8_t header[FFS_HEADER_BYTES];
 +    int32_t length;
@@ -317,9 +331,11 @@
 +    if (header[0] != expected_type || (int8_t)header[1] != expected_sequence ||
 +        (int8_t)header[1] < 0 || length < 0 ||
 +        (expected_length >= 0 && length != expected_length)) {
-+        av_log(h, AV_LOG_ERROR, "ffstreamer: the parent sent type %d, number %d, length %d; "
-+               "expected type %d, number %d, length %d\n", header[0], (int8_t)header[1],
-+               length, expected_type, expected_sequence, expected_length);
++        av_log(h, AV_LOG_ERROR,
++               "ffstreamer: the parent sent type %d, number %d, length %d; "
++               "expected type %d, number %d, length %d\n",
++               header[0], (int8_t)header[1], length,
++               expected_type, expected_sequence, expected_length);
 +        ret = AVERROR(EPROTO);
 +        goto end;
 +    }
@@ -329,8 +345,9 @@
 +    return ret;
 +}
 +
-+/* --- Faults and DONE ------------------------------------------------------- */
++/* --- Faults and DONE ---------------------------------------------------- */
 +
++/** The kind DONE reports for an error. */
 +static int kind_of(int error)
 +{
 +    if (error == AVERROR_EXIT)
@@ -340,7 +357,7 @@
 +    return FFS_KIND_CHANNEL;
 +}
 +
-+/* Records the first fault; every later read returns it. The channel ending is
++/** Records the first fault; every later read returns it. The channel ending is
 + * an I/O error, never end-of-file: a parent that died must not look like the
 + * end of the film. */
 +static int set_fault(FFStreamerContext *c, int error)
@@ -354,6 +371,8 @@
 +    return c->fault;
 +}
 +
++/** Sends DONE, once: kind 0 for a session that ended well, otherwise the
++ * fault's kind, error code and message. */
 +static void send_done(URLContext *h, int kind, int error)
 +{
 +    FFStreamerContext *c = h->priv_data;
@@ -381,24 +400,28 @@
 +        length = 16 + (int32_t)message_length;
 +    }
 +    if (write_frame(c, FFS_DONE, body, length, NULL) < 0)
-+        av_log(h, AV_LOG_WARNING, "ffstreamer: DONE could not be sent; the parent has gone\n");
++        av_log(h, AV_LOG_WARNING,
++               "ffstreamer: DONE could not be sent; the parent has gone\n");
 +}
 +
-+/* --- Opening --------------------------------------------------------------- */
++/* --- Opening ------------------------------------------------------------ */
 +
++/** Checks that fd is a pipe open for access_mode, and sets FD_CLOEXEC. */
 +static int check_descriptor(URLContext *h, int fd, int access_mode)
 +{
 +    struct stat facts;
 +    int flags, ret = 0;
 +
 +    if (fstat(fd, &facts) < 0 || !S_ISFIFO(facts.st_mode)) {
-+        av_log(h, AV_LOG_ERROR, "ffstreamer: descriptor %d is not a pipe\n", fd);
++        av_log(h, AV_LOG_ERROR, "ffstreamer: descriptor %d is not a pipe\n",
++               fd);
 +        ret = AVERROR(EBADF);
 +        goto end;
 +    }
 +    flags = fcntl(fd, F_GETFL);
 +    if (flags < 0 || (flags & O_ACCMODE) != access_mode) {
-+        av_log(h, AV_LOG_ERROR, "ffstreamer: descriptor %d is not open for its direction\n", fd);
++        av_log(h, AV_LOG_ERROR,
++               "ffstreamer: descriptor %d is not open for its direction\n", fd);
 +        ret = AVERROR(EBADF);
 +        goto end;
 +    }
@@ -408,6 +431,8 @@
 +    return ret;
 +}
 +
++/** Sends this side's HELLO and reads the parent's: the highest version both
++ * speak, or a negative AVERROR. */
 +static int exchange_hellos(URLContext *h)
 +{
 +    FFStreamerContext *c = h->priv_data;
@@ -426,8 +451,11 @@
 +    lowest = (int16_t)AV_RL16(body);
 +    highest = (int16_t)AV_RL16(body + 2);
 +    if (lowest < 1 || highest < lowest ||
-+        FFMIN(highest, FFS_VERSION_HIGHEST) < FFMAX(lowest, FFS_VERSION_LOWEST)) {
-+        av_log(h, AV_LOG_ERROR, "ffstreamer: the parent speaks versions %d to %d, this side %d to %d\n",
++        FFMIN(highest, FFS_VERSION_HIGHEST) <
++        FFMAX(lowest, FFS_VERSION_LOWEST)) {
++        av_log(h, AV_LOG_ERROR,
++               "ffstreamer: the parent speaks versions %d to %d, "
++               "this side %d to %d\n",
 +               lowest, highest, FFS_VERSION_LOWEST, FFS_VERSION_HIGHEST);
 +        ret = AVERROR(EPROTO);
 +        goto end;
@@ -437,9 +465,10 @@
 +    return ret;
 +}
 +
-+/* Returns 0 for good terms, a negative AVERROR for a malformed REQUEST (no DONE),
-+ * or 1 for well-formed terms that break the rules (DONE TERMS). */
-+static int receive_request(URLContext *h, int version, int8_t capability_sequence)
++/** Returns 0 for good terms, a negative AVERROR for a malformed REQUEST
++ * (no DONE), or 1 for well-formed terms that break the rules (DONE TERMS). */
++static int receive_request(URLContext *h, int version,
++                           int8_t capability_sequence)
 +{
 +    FFStreamerContext *c = h->priv_data;
 +    uint8_t body[27];
@@ -464,11 +493,15 @@
 +        ret = AVERROR(EPROTO);
 +        goto end;
 +    }
-+    if (request_version != version || c->run < 1 || c->size > FFS_LARGEST_FILE ||
++    if (request_version != version || c->run < 1 ||
++        c->size > FFS_LARGEST_FILE ||
 +        c->block < 1 || c->block > FFS_LARGEST_BODY ||
 +        c->longest < c->block || c->longest > FFS_LARGEST_BODY ||
-+        c->outstanding_allowed < 1 || c->outstanding_allowed > FFS_OUTSTANDING_CAP) {
-+        av_log(h, AV_LOG_ERROR, "ffstreamer: REQUEST's terms are outside what this side offered\n");
++        c->outstanding_allowed < 1 ||
++        c->outstanding_allowed > FFS_OUTSTANDING_CAP) {
++        av_log(h, AV_LOG_ERROR,
++               "ffstreamer: REQUEST's terms are outside what this side "
++               "offered\n");
 +        ret = 1;
 +        goto end;
 +    }
@@ -477,7 +510,8 @@
 +    return ret;
 +}
 +
-+/* Closing its descriptors ends the session's claim: no later open reaches its pipe through them. */
++/** Closing its descriptors ends the session's claim: no later open reaches
++ * its pipe through them. */
 +static void close_descriptors(FFStreamerContext *c)
 +{
 +    release_channel(c);
@@ -506,7 +540,8 @@
 +
 +    /* Until the channel is claimed, its descriptors are not ours to close. */
 +    if (strcmp(url, "ffstreamer:")) {
-+        av_log(h, AV_LOG_ERROR, "ffstreamer: the URL must be exactly \"ffstreamer:\"\n");
++        av_log(h, AV_LOG_ERROR,
++               "ffstreamer: the URL must be exactly \"ffstreamer:\"\n");
 +        ret = AVERROR(EINVAL);
 +        goto unclaimed;
 +    }
@@ -515,7 +550,8 @@
 +        goto unclaimed;
 +    }
 +    if (c->read_fd < 0 || c->write_fd < 0) {
-+        av_log(h, AV_LOG_ERROR, "ffstreamer: -ffstreamer_read_fd and -ffstreamer_write_fd are required\n");
++        av_log(h, AV_LOG_ERROR, "ffstreamer: -ffstreamer_read_fd and "
++               "-ffstreamer_write_fd are required\n");
 +        ret = AVERROR(EINVAL);
 +        goto unclaimed;
 +    }
@@ -535,7 +571,8 @@
 +    AV_WL32(body, FFS_PREFERRED_BLOCK);
 +    AV_WL32(body + 4, FFS_LARGEST_BODY);
 +    body[8] = FFS_OUTSTANDING_CAP;
-+    if ((ret = write_frame(c, FFS_CAPABILITY, body, 9, &capability_sequence)) < 0)
++    ret = write_frame(c, FFS_CAPABILITY, body, 9, &capability_sequence);
++    if (ret < 0)
 +        goto fail;
 +
 +    ret = receive_request(h, version, capability_sequence);
@@ -582,6 +619,7 @@
 +
 +/* --- The block cache ----------------------------------------------------- */
 +
++/** The slot holding block index, or -1. */
 +static int find_block(FFStreamerContext *c, int64_t index)
 +{
 +    for (int i = 0; i < c->cache_blocks; i++)
@@ -590,7 +628,7 @@
 +    return -1;
 +}
 +
-+/* The least recently used block that no outstanding READ will fill. */
++/** The least recently used block that no outstanding READ will fill. */
 +static int free_slot(FFStreamerContext *c)
 +{
 +    int chosen = -1;
@@ -611,6 +649,7 @@
 +    return (int32_t)FFMIN((int64_t)c->block, c->size - start);
 +}
 +
++/** Asks the parent for block index, into a free slot. */
 +static int send_read(URLContext *h, int64_t index)
 +{
 +    FFStreamerContext *c = h->priv_data;
@@ -621,7 +660,8 @@
 +    int8_t sequence;
 +
 +    if (slot < 0) {
-+        ret = AVERROR_BUG;      /* the cache is larger than what may be outstanding */
++        /* the cache is larger than what may be outstanding */
++        ret = AVERROR_BUG;
 +        goto end;
 +    }
 +    AV_WL64(body, (uint64_t)(index * c->block));
@@ -634,7 +674,8 @@
 +    c->blocks[slot].index = index;
 +    c->blocks[slot].length = length;
 +    c->blocks[slot].pending = 1;
-+    entry = &c->outstanding[(c->outstanding_first + c->outstanding_count) % FFS_MAX_OUTSTANDING];
++    entry = &c->outstanding[(c->outstanding_first + c->outstanding_count) %
++                            FFS_MAX_OUTSTANDING];
 +    entry->sequence = sequence;
 +    entry->offset = index * c->block;
 +    entry->length = length;
@@ -644,16 +685,18 @@
 +    return ret;
 +}
 +
-+/* Takes the answer to the oldest outstanding READ into its block. */
++/** Takes the answer to the oldest outstanding READ into its block. */
 +static int receive_data(URLContext *h)
 +{
 +    FFStreamerContext *c = h->priv_data;
 +    FFStreamerOutstanding *oldest = &c->outstanding[c->outstanding_first];
 +    int ret;
 +
-+    if ((ret = read_header(h, FFS_DATA, oldest->sequence, oldest->length, NULL)) < 0)
++    ret = read_header(h, FFS_DATA, oldest->sequence, oldest->length, NULL);
++    if (ret < 0)
 +        goto fault;
-+    /* The slot is freed no earlier than reading the DATA header (the specification's READ). */
++    /* The slot is freed no earlier than reading the DATA header (the
++     * specification's READ). */
 +    c->outstanding_first = (c->outstanding_first + 1) % FFS_MAX_OUTSTANDING;
 +    c->outstanding_count--;
 +    if ((ret = read_exact(h, c->blocks[oldest->slot].data, oldest->length)) < 0)
@@ -668,10 +711,12 @@
 +    return ret;
 +}
 +
++/** Whether a READ for block index is awaiting its DATA. */
 +static int is_outstanding(FFStreamerContext *c, int64_t index)
 +{
 +    for (int i = 0; i < c->outstanding_count; i++)
-+        if (c->outstanding[(c->outstanding_first + i) % FFS_MAX_OUTSTANDING].offset == index * c->block)
++        if (c->outstanding[(c->outstanding_first + i) %
++                           FFS_MAX_OUTSTANDING].offset == index * c->block)
 +            return 1;
 +    return 0;
 +}
@@ -703,11 +748,13 @@
 +        while (c->outstanding_count >= c->outstanding_allowed)
 +            if ((ret = receive_data(h)) < 0)
 +                goto end;
-+        if ((slot = find_block(c, index)) < 0 && (ret = send_read(h, index)) < 0)
++        if ((slot = find_block(c, index)) < 0 &&
++            (ret = send_read(h, index)) < 0)
 +            goto end;
 +    }
 +
-+    /* The block about to be read is the most recently used, so a prefetch never evicts it. */
++    /* The block about to be read is the most recently used, so a prefetch
++     * never evicts it. */
 +    if (slot >= 0)
 +        c->blocks[slot].last_used = ++c->use_clock;
 +
