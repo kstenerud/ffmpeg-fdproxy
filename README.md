@@ -101,8 +101,11 @@ overflowed rounding up to whole blocks, fixed and kept as a seed.
 
 ## Licence
 
-LGPL 2.1 or later ([LICENSE](LICENSE)), as FFmpeg's own source is: the patches, the protocol and
-its grammar, the reference parent and the tests. The binaries built with these patches are GPL, as
+The code is LGPL 2.1 or later ([LICENSE](LICENSE)), as FFmpeg's own source is: the patches, the
+reference parent, the tests and the tools. The specification and its grammar
+([ffstreamer-specification.md](ffstreamer-specification.md), [ffstreamer.dogma](ffstreamer.dogma))
+are under the [Creative Commons Attribution License](https://creativecommons.org/licenses/by/4.0/),
+so anyone may implement the protocol in any program. The binaries built with these patches are GPL, as
 jellyfin-ffmpeg's builds are, since its configuration enables GPL libraries such as x264. Every
 release publishes the patches and the jellyfin-ffmpeg tag it applies to, so its source can always
 be had.
