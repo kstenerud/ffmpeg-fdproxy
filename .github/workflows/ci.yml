@@ -24,6 +24,18 @@ jobs:
       - run: make check-patch
       - run: make check-spec
 
+  upstream:
+    needs: check-patch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The series on FFmpeg's own tree, its FATE test and manual
+        run: |
+          git config --global user.name "ci"
+          git config --global user.email "ci@invalid"
+          make test-upstream
+
   fuzz:
     needs: check-patch
     runs-on: ubuntu-24.04

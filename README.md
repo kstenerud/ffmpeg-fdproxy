@@ -23,6 +23,12 @@ given.
 
 * [Patch: ffstreamer protocol in libavformat](patches/9000-ffstreamer-protocol.patch)
 * [Patch: ffmpeg and ffprobe exit non-zero when an input's reads failed](patches/9001-fftools-input-errors.patch)
+* For FFmpeg's own tree: `make upstream` writes the same changes as a series of six commits on the
+  FFmpeg commit `UPSTREAM_COMMIT` names, into `build/upstream/`: the protocol with its manual
+  entry, Changelog line and version bump; a FATE test; then `seek.c`, `ffmpeg_demux.c`, `ffmpeg.c`
+  and `ffprobe.c` one each. `tools/upstream.py` makes each change at an anchor in FFmpeg's file,
+  from `src/` and `upstream/`, and fails when the fftools or `seek.c` lines differ from `patches/`.
+  The commits carry no `Signed-off-by`; `git format-patch -s` adds the sender's.
 
 ## Verification
 
@@ -80,6 +86,8 @@ make test-claims          # a pipe serves one session at a time; a closed one's 
 make check-patch          # patches/9000 carries src/libavformat/ffstreamer.c as it stands
 make check-spec           # the specification embeds ffstreamer.dogma as it stands
 make patch                # rewrites patches/9000 from src/ after an edit there
+make upstream             # the series for FFmpeg's own tree, into build/upstream/
+make test-upstream        # the series built on FFmpeg master, its FATE test run, its manual built
 ```
 
 `checkout.sh` checks out jellyfin-ffmpeg at the tag in `JELLYFIN_TAG`, adds `patches/` after
@@ -97,6 +105,11 @@ FFmpeg built the same way, and runs it on eight workers from the seeds in `fuzz/
 (`fuzz/make_corpus.py` writes them), then makes seeks at the edges of the arithmetic.
 `make test-claims` builds `test/claims_test.c` the same way and runs it.
 
+`make test-upstream` builds FFmpeg at `UPSTREAM_COMMIT` with the series and nothing else enabled, in
+Docker, fails on any warning in the series' files, builds the protocols manual, and runs
+`fate-ffstreamer`: `src/libavformat/tests/ffstreamer.c`, which serves a file from a thread over two
+pipes and reads it through the public avio API, against `src/tests/ref/fate/ffstreamer`.
+
 ## Layout
 
 | Path | What |
@@ -105,10 +118,11 @@ FFmpeg built the same way, and runs it on eight workers from the seeds in `fuzz/
 | [`DESIGN.md`](DESIGN.md) | Why the protocol is as it is: rationale, FFmpeg's internals, testing, measurements, open questions. |
 | [`ffstreamer.dogma`](ffstreamer.dogma) | The protocol's wire format, in [Dogma](https://github.com/kstenerud/dogma). |
 | [`patches/`](patches/) | The patches, appended to jellyfin-ffmpeg's own `debian/patches/series`. |
-| [`src/`](src/) | The protocol's source, from which `patches/9000` is made. |
+| [`src/`](src/) | The protocol's source, from which `patches/9000` is made, and its FATE test and reference. |
+| [`upstream/`](upstream/), [`UPSTREAM_COMMIT`](UPSTREAM_COMMIT) | The manual entry for FFmpeg's own tree, and the FFmpeg commit the series is made on. |
 | [`checkout.sh`](checkout.sh), [`build.sh`](build.sh), [`Makefile`](Makefile), [`JELLYFIN_TAG`](JELLYFIN_TAG) | Building the patched FFmpeg (above). |
 | [`fuzz/`](fuzz/) | The fuzz harness of FFmpeg's side, its build and its seeds. |
-| [`tools/`](tools/) | `check_patch.py`, `check_spec.py` and `sync_patch.py`, and scripts for the development tree (`build_dev.sh`, and the edits it applies). |
+| [`tools/`](tools/) | `check_patch.py`, `check_spec.py` and `sync_patch.py`; `upstream.sh` and `upstream.py`, which make the series for FFmpeg's own tree; and scripts for the development tree (`build_dev.sh`, and the edits it applies). |
 | [`.github/workflows/`](.github/workflows/) | CI and releases (below). |
 | [`bench/`](bench/) | The measurements behind the protocol's choices, and the scripts that make them. |
 | [`audits/`](audits/) | The audits of each draft. |
@@ -118,8 +132,8 @@ FFmpeg built the same way, and runs it on eight workers from the seeds in `fuzz/
 
 `.github/workflows/`:
 
-* **ci**, on every pull request and push to main: the patch and grammar checks, the claims test,
-  five minutes of fuzzing, then the build and the suite on amd64 and arm64, each on its own architecture. A build
+* **ci**, on every pull request and push to main: the patch and grammar checks, the series on
+  FFmpeg's own tree with its FATE test, the claims test, five minutes of fuzzing, then the build and the suite on amd64 and arm64, each on its own architecture. A build
   starts cold, about an hour, because jellyfin's toolchain cache is larger than an Actions cache.
 * **fuzz-weekly**: five hours of fuzzing every Sunday.
 * **release**, on a tag `v<jellyfin version>-<n>` (`v8.1.2-5-1` is the first release on

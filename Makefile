@@ -47,6 +47,14 @@ test-claims: checkout ## Check that a pipe serves one session at a time and a cl
 	fuzz/build.sh build/jellyfin-ffmpeg build/fuzz
 	docker run --rm -v "$$PWD/build/fuzz":/work -w /work debian:trixie ./claims_test
 
+.PHONY: upstream
+upstream: ## Make the series for FFmpeg's own tree, at UPSTREAM_COMMIT, into build/upstream/
+	tools/upstream.sh build/upstream
+
+.PHONY: test-upstream
+test-upstream: ## Make the series, then build it and run its FATE test and the protocols manual's build
+	tools/upstream.sh --test build/upstream
+
 .PHONY: fuzz
 fuzz: checkout ## Fuzz FFmpeg's side for FUZZ_SECONDS (default 600) on FUZZ_JOBS workers under ASan and UBSan
 	fuzz/build.sh build/jellyfin-ffmpeg build/fuzz

@@ -1,0 +1,34 @@
+@section ffstreamer
+
+Read an input whose every byte a parent process serves, by offset, over two
+pipes it hands down. FFmpeg confined by a sandbox can then read its input with
+no path to the file, no socket and no other way to reach the storage: the
+parent decides every read, and storage that stops answering holds the parent,
+which can always end the run, rather than FFmpeg waiting in the kernel.
+
+The parent speaks the ffstreamer protocol, specified at
+@url{https://github.com/kstenerud/ffmpeg-ffstreamer}. It creates the two pipes,
+hands FFmpeg one end of each, and names them with the options below. The URL is
+exactly @code{ffstreamer:}, with nothing after it. Reading only; each pipe
+serves one session at a time.
+
+This protocol accepts the following options:
+
+@table @option
+@item ffstreamer_read_fd
+The descriptor the parent's messages arrive on. Required.
+
+@item ffstreamer_write_fd
+The descriptor this side's messages go out on. Required.
+
+@item ffstreamer_cache_blocks
+How many of the parent's blocks to keep, from 2 to 1024. Default 32.
+@end table
+
+The parent should restrict the input to this protocol, since a nested open
+could otherwise name one of the channel's descriptors with @code{pipe:} or
+@code{fd:}:
+@example
+ffmpeg -protocol_whitelist ffstreamer -ffstreamer_read_fd 4 -ffstreamer_write_fd 5 -i ffstreamer: ...
+@end example
+
