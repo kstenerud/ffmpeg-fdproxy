@@ -137,8 +137,10 @@ typedef struct FFStreamerContext {
 static AVMutex claims_lock = AV_MUTEX_INITIALIZER;
 static FFStreamerContext *claims;
 
-/** Claims the session's pipe for as long as it is open: EBUSY when another
- * open session has it, EBADF when the descriptor is not a pipe. */
+/**
+ * Claims the session's pipe for as long as it is open: EBUSY when another
+ * open session has it, EBADF when the descriptor is not a pipe.
+ */
 static int claim_channel(URLContext *h)
 {
     FFStreamerContext *c = h->priv_data;
@@ -197,8 +199,10 @@ static int8_t next_sequence(int8_t sequence)
 
 /* --- Writing ------------------------------------------------------------ */
 
-/** One write() of a whole frame, with SIGPIPE consumed rather than delivered,
- * whatever the program's disposition. */
+/**
+ * One write() of a whole frame, with SIGPIPE consumed rather than delivered,
+ * whatever the program's disposition.
+ */
 static int write_frame_locked(FFStreamerContext *c, uint8_t type,
                               const uint8_t *body, int32_t body_length,
                               int8_t *sequence_out)
@@ -267,9 +271,11 @@ static int write_frame(FFStreamerContext *c, uint8_t type, const uint8_t *body,
 
 /* --- Reading ------------------------------------------------------------ */
 
-/** Reads exactly length bytes, waiting as long as the parent likes, in
+/**
+ * Reads exactly length bytes, waiting as long as the parent likes, in
  * slices, checking FFmpeg's interrupt between them. End-of-file is the
- * channel ending. */
+ * channel ending.
+ */
 static int read_exact(URLContext *h, uint8_t *buffer, int64_t length)
 {
     FFStreamerContext *c = h->priv_data;
@@ -303,7 +309,7 @@ static int read_exact(URLContext *h, uint8_t *buffer, int64_t length)
             ret = AVERROR(errno);
             goto end;
         }
-        if (n == 0) {
+        if (!n) {
             ret = AVERROR_EOF;
             goto end;
         }
@@ -354,9 +360,11 @@ static int kind_of(int error)
     return FFS_KIND_CHANNEL;
 }
 
-/** Records the first fault; every later read returns it. The channel ending is
+/**
+ * Records the first fault; every later read returns it. The channel ending is
  * an I/O error, never end-of-file: a parent that died must not look like the
- * end of the film. */
+ * end of the film.
+ */
 static int set_fault(FFStreamerContext *c, int error)
 {
     if (error == AVERROR_EOF)
@@ -368,8 +376,10 @@ static int set_fault(FFStreamerContext *c, int error)
     return c->fault;
 }
 
-/** Sends DONE, once: kind 0 for a session that ended well, otherwise the
- * fault's kind, error code and message. */
+/**
+ * Sends DONE, once: kind 0 for a session that ended well, otherwise the
+ * fault's kind, error code and message.
+ */
 static void send_done(URLContext *h, int kind, int error)
 {
     FFStreamerContext *c = h->priv_data;
@@ -428,8 +438,10 @@ end:
     return ret;
 }
 
-/** Sends this side's HELLO and reads the parent's: the highest version both
- * speak, or a negative AVERROR. */
+/**
+ * Sends this side's HELLO and reads the parent's: the highest version both
+ * speak, or a negative AVERROR.
+ */
 static int exchange_hellos(URLContext *h)
 {
     FFStreamerContext *c = h->priv_data;
@@ -462,8 +474,10 @@ end:
     return ret;
 }
 
-/** Returns 0 for good terms, a negative AVERROR for a malformed REQUEST
- * (no DONE), or 1 for well-formed terms that break the rules (DONE TERMS). */
+/**
+ * Returns 0 for good terms, a negative AVERROR for a malformed REQUEST
+ * (no DONE), or 1 for well-formed terms that break the rules (DONE TERMS).
+ */
 static int receive_request(URLContext *h, int version,
                            int8_t capability_sequence)
 {
@@ -507,8 +521,10 @@ end:
     return ret;
 }
 
-/** Closing its descriptors ends the session's claim: no later open reaches
- * its pipe through them. */
+/**
+ * Closing its descriptors ends the session's claim: no later open reaches
+ * its pipe through them.
+ */
 static void close_descriptors(FFStreamerContext *c)
 {
     release_channel(c);
@@ -739,7 +755,7 @@ static int ffstreamer_read(URLContext *h, unsigned char *buf, int size)
 
     index = c->position / c->block;
     /* Rounded up without adding: a size near INT64_MAX must not overflow. */
-    blocks_in_file = c->size / c->block + (c->size % c->block != 0);
+    blocks_in_file = c->size / c->block + !!(c->size % c->block);
 
     if ((slot = find_block(c, index)) < 0) {
         while (c->outstanding_count >= c->outstanding_allowed)

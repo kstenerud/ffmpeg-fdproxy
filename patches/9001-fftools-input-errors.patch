@@ -1,28 +1,35 @@
 --- a/fftools/ffmpeg_demux.c
 +++ b/fftools/ffmpeg_demux.c
-@@ -840,6 +840,14 @@
+@@ -840,6 +840,17 @@
              break;
      }
  
-+    /* An input whose reads failed fails the run, where it would otherwise end
-+     * as if the input had simply ended (ffstreamer's specification, Exit Status). */
++    /* An input whose reads failed fails the run, where it would otherwise
++     * end as if the input had simply ended. */
 +    if ((ret >= 0 || ret == AVERROR_EOF || ret == AVERROR_EXIT) &&
-+        f->ctx->pb && f->ctx->pb->error < 0 && f->ctx->pb->error != AVERROR(EAGAIN)) {
-+        ret = f->ctx->pb->error == AVERROR_EXIT ? AVERROR(EINTR) : f->ctx->pb->error;
-+        av_log(d, AV_LOG_ERROR, "Reading the input failed: %s\n", av_err2str(ret));
++        f->ctx->pb && f->ctx->pb->error < 0 &&
++        f->ctx->pb->error != AVERROR(EAGAIN)) {
++        ret = f->ctx->pb->error == AVERROR_EXIT ? AVERROR(EINTR)
++                                                : f->ctx->pb->error;
++        av_log(d, AV_LOG_ERROR, "Reading the input failed: %s\n",
++               av_err2str(ret));
 +    }
 +
      // EOF/EXIT is normal termination
      if (ret == AVERROR_EOF || ret == AVERROR_EXIT)
          ret = 0;
-@@ -2158,6 +2166,12 @@
+@@ -2158,6 +2169,16 @@
              if (ic->nb_streams == 0)
                  return ret;
          }
-+        /* A read that failed while probing is not the input ending (ffstreamer). */
-+        if (ic->pb && ic->pb->error < 0 && ic->pb->error != AVERROR(EAGAIN)) {
-+            ret = ic->pb->error == AVERROR_EXIT ? AVERROR(EINTR) : ic->pb->error;
-+            av_log(d, AV_LOG_FATAL, "Reading the input failed while probing it: %s\n", av_err2str(ret));
++        /* A read that failed while probing is not the input ending. */
++        if (ic->pb && ic->pb->error < 0 &&
++            ic->pb->error != AVERROR(EAGAIN)) {
++            ret = ic->pb->error == AVERROR_EXIT ? AVERROR(EINTR)
++                                                : ic->pb->error;
++            av_log(d, AV_LOG_FATAL,
++                   "Reading the input failed while probing it: %s\n",
++                   av_err2str(ret));
 +            return ret;
 +        }
      }
@@ -34,8 +41,8 @@
            (ret == FFMPEG_ERROR_RATE_EXCEEDED) ?  69 : ret;
  
  finish:
-+    /* An interrupt during the opening of an input never reaches transcode(); a
-+     * signal must still exit non-zero (ffstreamer's specification, Exit Status). */
++    /* An interrupt during the opening of an input never reaches
++     * transcode(); a signal must still exit non-zero. */
      if (ret == AVERROR_EXIT)
 -        ret = 0;
 +        ret = received_nb_signals ? 255 : 0;
@@ -44,15 +51,17 @@
  
 --- a/fftools/ffprobe.c
 +++ b/fftools/ffprobe.c
-@@ -2731,6 +2731,12 @@
+@@ -2731,6 +2731,14 @@
      }
  
  end:
-+    /* A read that failed is not the input ending (ffstreamer's specification, Exit Status). */
++    /* A read that failed is not the input ending. */
 +    if (ret >= 0 && ifile.fmt_ctx && ifile.fmt_ctx->pb &&
-+        ifile.fmt_ctx->pb->error < 0 && ifile.fmt_ctx->pb->error != AVERROR(EAGAIN)) {
++        ifile.fmt_ctx->pb->error < 0 &&
++        ifile.fmt_ctx->pb->error != AVERROR(EAGAIN)) {
 +        ret = ifile.fmt_ctx->pb->error;
-+        av_log(NULL, AV_LOG_ERROR, "Reading the input failed: %s\n", av_err2str(ret));
++        av_log(NULL, AV_LOG_ERROR, "Reading the input failed: %s\n",
++               av_err2str(ret));
 +    }
      if (ifile.fmt_ctx)
          close_input_file(&ifile);
