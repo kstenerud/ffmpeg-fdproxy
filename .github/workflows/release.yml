@@ -18,11 +18,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: The tag names the pinned jellyfin-ffmpeg
         run: |
-          case "$GITHUB_REF_NAME" in
-            "$(cat JELLYFIN_TAG)"-[0-9]*) ;;
-            *) echo "tag $GITHUB_REF_NAME does not start with $(cat JELLYFIN_TAG)-<n>"; exit 1 ;;
+          # Exactly <jellyfin tag>-<n>, n from 1 without leading zeros: not v8.1.2-50-1, nor v8.1.2-5-1x.
+          n=${GITHUB_REF_NAME#"$(cat JELLYFIN_TAG)"-}
+          case "$n" in
+            "$GITHUB_REF_NAME" | "" | 0* | *[!0-9]*)
+              echo "tag $GITHUB_REF_NAME is not $(cat JELLYFIN_TAG)-<n>"; exit 1 ;;
           esac
       - run: make check-patch
+      - run: make check-spec
 
   build:
     needs: check-tag
