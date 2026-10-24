@@ -5,6 +5,7 @@ BIN   ?= dist/bin-amd64
 MEDIA ?= media
 FUZZ_SECONDS ?= 600
 FUZZ_JOBS ?= 8
+ARCH  ?= amd64
 
 .PHONY: help
 help: ## List the targets
@@ -33,6 +34,11 @@ build-amd64: ## Build the patched FFmpeg for linux/amd64 into OUT (default dist/
 .PHONY: build-arm64
 build-arm64: ## Build the patched FFmpeg for linux/arm64 into OUT (default dist/); needs Docker
 	./build.sh arm64 $(OUT)
+
+.PHONY: remote-build
+remote-build: ## Build HEAD on HOST (an ssh target, e.g. "-i ~/.ssh/key user@host") for ARCH (default amd64) into OUT; the host keeps each commit's build, so a commit built once is fetched, not built again
+	@test -n '$(HOST)' || { echo "HOST is the ssh target to build on"; exit 2; }
+	tools/remote_build.sh "$(HOST)" $(ARCH) $(OUT)
 
 .PHONY: media
 media: ## Make the suite's films into MEDIA (default media/) from FFmpeg's test sources, with BIN's ffmpeg
