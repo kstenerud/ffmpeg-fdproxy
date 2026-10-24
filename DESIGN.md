@@ -210,15 +210,16 @@ Testing
   the input's raw bytes), the terms, the cache, the pipe of requests (a page, full, unread, closed),
   when the interrupt fires and which system calls fail; a script of reads, seeks, second opens and
   the parent's own moves follows, through the protocol, FFmpeg's URL layer or avio. The harness
-  takes the protocol's `poll`, `read`, `write` and `close`, plays the parent between its steps, and
+  takes the protocol's `poll`, `read`, `write`, `close`, `fcntl` and `dup`, plays the parent between
+  its steps, follows every descriptor it duplicates and closes, and
   counts a silent slice instead of waiting it, so no input depends on the clock. It checks the
   specification's invariants as it goes, the bytes of every read against the file among them, and
   aborts on a breach ([README](README.md#building) lists them). Each of these faults injected into
-  the protocol is found: the interrupt checked only on idle slices, a refused open closing its
-  descriptors, only the read pipe claimed, LRU eviction made MRU, the sticky fault dropped, SIGPIPE
-  left unblocked, end of file not mapped to `EIO`, `O_NONBLOCK` kept, the wait for room made
-  uninterruptible, the sequence check removed, a prefetch past the `READ`s outstanding, and the
-  `EAGAIN` map removed (README's Fuzzing gives the times).
+  the protocol is found: the interrupt checked only on idle slices, only the read pipe claimed, LRU
+  eviction made MRU, the sticky fault dropped, end of file not mapped to `EIO`, the wait for room
+  made uninterruptible, the sequence check removed, a prefetch past the `READ`s outstanding, the
+  `EAGAIN` map removed from a read or from the open, the caller's descriptor closed, a duplicate
+  leaked, and `O_NONBLOCK` cleared on the caller's descriptor (README's Fuzzing gives the times).
 * **Still to cover:**
     * two inputs, one choked by fftools' scheduler while the other is served;
     * a dead share: a storage read that never returns (a FUSE file) must leave FFmpeg killable at

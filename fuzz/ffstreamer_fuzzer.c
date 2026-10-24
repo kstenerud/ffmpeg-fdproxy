@@ -5,7 +5,8 @@
  * of operations follows (reads of any size, seeks with any whence, through the protocol's functions,
  * FFmpeg's URL layer or avio, a second open sharing or refusing descriptors, the parent closing or
  * filling a pipe). The harness is single-threaded and keeps no wall clock: the protocol's poll(),
- * read(), write() and close() are routed through it, a poll never waits, and a slice that would
+ * read(), write(), close(), fcntl() and dup() are routed through it, so it knows every descriptor
+ * the protocol duplicates and closes; a poll never waits, and a slice that would
  * have passed in silence is counted instead, so the parent acts between the protocol's own steps,
  * deterministically. It checks the specification's invariants as it goes, and aborts on a breach
  * (see check_read(), check_seek(), parse_frame(), finish_session()). Built with AddressSanitizer and
@@ -36,6 +37,7 @@
 #include "config.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <stdarg.h>
 #include <limits.h>
 #include <poll.h>
 #include <signal.h>
@@ -65,6 +67,8 @@ static int hook_poll(struct pollfd *fds, nfds_t count, int timeout);
 static ssize_t hook_read(int fd, void *buffer, size_t length);
 static ssize_t hook_write(int fd, const void *buffer, size_t length);
 static int hook_close(int fd);
+static int hook_fcntl(int fd, int command, ...);
+static int hook_dup(int fd);
 
 /* The protocol itself, its system calls routed through the harness and its URLProtocol renamed, so
  * the library's stays apart. */
@@ -73,11 +77,15 @@ static int hook_close(int fd);
 #define read  hook_read
 #define write hook_write
 #define close hook_close
+#define fcntl hook_fcntl
+#define dup   hook_dup
 #include "libavformat/ffstreamer.c"
 #undef poll
 #undef read
 #undef write
 #undef close
+#undef fcntl
+#undef dup
 
 #define HEADER_BYTES   16
 #define OP_BYTES       4
@@ -114,8 +122,10 @@ typedef struct Parent {
     int to_w;           ///< its end of the pipe to the protocol (non-blocking), or -1
     int from_r;         ///< its end of the pipe from the protocol (non-blocking), or -1
     int junk_w;         ///< the protocol's pipe of requests opened again, to fill it, or -1
-    int ffmpeg_read;    ///< the protocol's descriptors, while its session holds them, else -1
+    int ffmpeg_read;    ///< the caller's descriptors handed to the main session, or -1
     int ffmpeg_write;
+    int dup_read;       ///< the session's duplicates of them, while it holds them, else -1
+    int dup_write;
 
     uint8_t *queue;     ///< everything it will send, in order
     size_t queue_length, queue_size, sent;
@@ -179,7 +189,10 @@ typedef struct Global {
     int lossy;          ///< DONE may fail to reach the parent
     int back_closed;
     int write_injected; ///< a write failed by injection, not retried
-    int closed_fds[16], closed_count;
+    int closed_fds[16], closed_count; ///< what the protocol closed in this op
+    int dups[16], dups_count; ///< the protocol's duplicates, open
+    int main_opening;   ///< the main session's open is running
+    int caller_fl[2], caller_fd_flags[2]; ///< the main session's caller descriptors' flags
 
     /* The model. */
     int fault;          ///< the first error a read returned, 0 while healthy
@@ -206,7 +219,7 @@ static int kind_of_error(int error)
 {
     if (error == AVERROR_EXIT)
         return FFS_KIND_INTERRUPTED;
-    if (error == AVERROR(EPROTO))
+    if (error == AVERROR_INVALIDDATA)
         return FFS_KIND_PROTOCOL;
     return FFS_KIND_CHANNEL;
 }
@@ -630,11 +643,11 @@ static void idle_slice(Parent *p, int write_side)
 
 static Parent *parent_of(int fd, int *write_side)
 {
-    if (fd >= 0 && fd == G.p.ffmpeg_read) {
+    if (fd >= 0 && fd == G.p.dup_read) {
         *write_side = 0;
         return &G.p;
     }
-    if (fd >= 0 && fd == G.p.ffmpeg_write) {
+    if (fd >= 0 && fd == G.p.dup_write) {
         *write_side = 1;
         return &G.p;
     }
@@ -722,10 +735,55 @@ static ssize_t hook_write(int fd, const void *buffer, size_t length)
     return n;
 }
 
+/** A descriptor the protocol made: it must close it, once. */
+static void note_dup(int from, int fd)
+{
+    for (int i = 0; i < G.dups_count; i++)
+        CHECK(G.dups[i] != fd, "a duplicate the protocol holds made again");
+    CHECK(G.dups_count < FF_ARRAY_ELEMS(G.dups), "the protocol holds too many duplicates");
+    G.dups[G.dups_count++] = fd;
+    if (G.main_opening && from == G.p.ffmpeg_read)
+        G.p.dup_read = fd;
+    if (G.main_opening && from == G.p.ffmpeg_write)
+        G.p.dup_write = fd;
+}
+
+static int hook_fcntl(int fd, int command, ...)
+{
+    va_list args;
+    long argument;
+    int ret;
+
+    va_start(args, command);
+    argument = va_arg(args, long);
+    va_end(args);
+    ret = fcntl(fd, command, argument);
+    if (ret >= 0 && (command == F_DUPFD || command == F_DUPFD_CLOEXEC))
+        note_dup(fd, ret);
+    return ret;
+}
+
+static int hook_dup(int fd)
+{
+    int ret = dup(fd);
+    if (ret >= 0)
+        note_dup(fd, ret);
+    return ret;
+}
+
+/** The protocol closes only descriptors it made, each exactly once: never the caller's. */
 static int hook_close(int fd)
 {
-    for (int i = 0; i < G.closed_count; i++)
-        CHECK(G.closed_fds[i] != fd, "a descriptor closed twice");
+    int i;
+    for (i = 0; i < G.dups_count && G.dups[i] != fd; i++)
+        ;
+    CHECK(i < G.dups_count,
+          "the protocol closed a descriptor it did not make (the caller's), or one twice");
+    G.dups[i] = G.dups[--G.dups_count];
+    if (fd == G.p.dup_read)
+        G.p.dup_read = -1;
+    if (fd == G.p.dup_write)
+        G.p.dup_write = -1;
     if (G.closed_count < FF_ARRAY_ELEMS(G.closed_fds))
         G.closed_fds[G.closed_count++] = fd;
     return close(fd);
@@ -733,17 +791,20 @@ static int hook_close(int fd)
 
 /* --- Checking the protocol's answers --------------------------------------------------------- */
 
-static int closed_by_protocol(int fd)
-{
-    for (int i = 0; i < G.closed_count; i++)
-        if (G.closed_fds[i] == fd)
-            return 1;
-    return 0;
-}
-
 static int is_open(int fd)
 {
     return fcntl(fd, F_GETFD) >= 0;
+}
+
+/** A caller's descriptor, after any open or op: open, its flags as the caller left them. */
+static void check_caller(int fd, int fl, int fd_flags, const char *what)
+{
+    if (fd < 0)
+        return;
+    if (!is_open(fd))
+        die(what);
+    CHECK(fcntl(fd, F_GETFL) == fl && fcntl(fd, F_GETFD) == fd_flags,
+          "the protocol changed a caller's descriptor's flags");
 }
 
 static void begin_op(void)
@@ -753,20 +814,13 @@ static void begin_op(void)
     G.closed_count = 0;
 }
 
-/** After every op: SIGPIPE neither left pending nor left blocked. */
+/** After every op: the main session's caller descriptors untouched. */
 static void end_op(void)
 {
-    sigset_t pending, mask;
-    sigemptyset(&pending);
-    sigpending(&pending);
-    CHECK(!sigismember(&pending, SIGPIPE), "SIGPIPE left pending");
-    pthread_sigmask(SIG_SETMASK, NULL, &mask);
-    CHECK(!sigismember(&mask, SIGPIPE), "SIGPIPE left blocked");
-}
-
-static void sigpipe_delivered(int signal_number)
-{
-    die("SIGPIPE delivered: a write did not consume it");
+    check_caller(G.p.ffmpeg_read, G.caller_fl[0], G.caller_fd_flags[0],
+                 "the protocol closed the caller's read descriptor");
+    check_caller(G.p.ffmpeg_write, G.caller_fl[1], G.caller_fd_flags[1],
+                 "the protocol closed the caller's write descriptor");
 }
 
 /** The protocol's url_read, checked: what FFmpeg's I/O layer may rely on. */
@@ -845,17 +899,27 @@ static int64_t check_seek(URLContext *h, int64_t position, int whence)
 
 static const URLProtocol checked_protocol = {
     .name            = "ffstreamer",
-    .url_open        = ffstreamer_init,
+    .url_open        = ffstreamer_open,
     .url_read        = check_read,
     .url_seek        = check_seek,
-    .url_close       = ffstreamer_close_all,
+    .url_close       = ffstreamer_close,
     .priv_data_size  = sizeof(FFStreamerContext),
     .priv_data_class = &ffstreamer_class,
+    .default_whitelist = "ffstreamer",
+};
+
+/* The URL layer's own options, so av_opt_free() frees the whitelist ffurl_connect() copies from
+ * default_whitelist, as the library's URLContext class does. */
+static const AVOption url_options[] = {
+    { "protocol_whitelist", "", offsetof(URLContext, protocol_whitelist), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, AV_OPT_FLAG_DECODING_PARAM },
+    { "protocol_blacklist", "", offsetof(URLContext, protocol_blacklist), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, AV_OPT_FLAG_DECODING_PARAM },
+    { NULL }
 };
 
 static const AVClass url_class = {
     .class_name = "URLContext",
     .item_name  = av_default_item_name,
+    .option     = url_options,
     .version    = LIBAVUTIL_VERSION_INT,
 };
 
@@ -880,17 +944,19 @@ static URLContext *make_context(const char *url, int flags, int read_fd, int wri
     h->interrupt_callback = (AVIOInterruptCB){ interrupt_callback, NULL };
     c->class = &ffstreamer_class;
     av_opt_set_defaults(c);
-    c->read_fd = read_fd;
-    c->write_fd = write_fd;
+    c->read_fd_option = read_fd;
+    c->write_fd_option = write_fd;
     c->cache_blocks = cache;
     return h;
 }
 
+/** Frees a context whose open failed, as ffurl_closep() does: the protocol's close is not called. */
 static void free_context(URLContext *h)
 {
     if (h) {
         av_opt_free(h->priv_data);
         av_free(h->priv_data);
+        av_opt_free(h);
         av_free(h);
     }
 }
@@ -959,6 +1025,7 @@ static void second_open(int variant, int preset)
     const char *url = "ffstreamer:";
     URLContext *h;
     uint32_t calls_before;
+    int dups_before, fl[2], fd_flags[2];
 
     main_open = G.open_ok && !G.closed && G.p.ffmpeg_read >= 0;
     if ((variant == 0 || variant == 1 || variant == 11) && !main_open)
@@ -992,24 +1059,32 @@ static void second_open(int variant, int preset)
     h = make_context(url, flags, read_fd, write_fd, 2);
     if (!h)
         goto end;
+    fl[0] = fcntl(read_fd, F_GETFL);
+    fd_flags[0] = fcntl(read_fd, F_GETFD);
+    fl[1] = fcntl(write_fd, F_GETFL);
+    fd_flags[1] = fcntl(write_fd, F_GETFD);
+    dups_before = G.dups_count;
     begin_op();
     calls_before = G.calls;
     ret = ffurl_connect(h, NULL);
     end_op();
+    CHECK(ret != AVERROR(EAGAIN) && ret != AVERROR_EOF, "an open returned EAGAIN or end of file");
+    /* Whatever the outcome, the caller's descriptors are as they were. */
+    if (variant != 8)
+        check_caller(read_fd, fl[0], fd_flags[0], "a second open closed its read descriptor");
+    check_caller(write_fd, fl[1], fd_flags[1], "a second open closed its write descriptor");
     if (expect != 1) {
-        /* Refused before the claim: nothing touched, nothing sent, nothing closed. */
+        /* Refused before the claim: nothing sent, nothing duplicated, nothing closed. */
         CHECK(ret == expect, "a refused open gave the wrong error");
         CHECK(G.calls == calls_before, "a refused open made system calls on its descriptors");
-        CHECK(G.closed_count == 0, "a refused open closed a descriptor");
-        CHECK(variant == 8 || is_open(read_fd), "a refused open left its read descriptor closed");
-        CHECK(is_open(write_fd), "a refused open left its write descriptor closed");
+        CHECK(G.dups_count == dups_before && G.closed_count == 0,
+              "a refused open duplicated or closed a descriptor");
         free_context(h);
         goto end;
     }
     CHECK(ret != AVERROR(EBUSY), "an open on fresh pipes was refused as busy");
     if (ret < 0) {
-        CHECK(closed_by_protocol(read_fd) && closed_by_protocol(write_fd) &&
-              G.closed_count == 2, "a failed open after its claim did not close both descriptors");
+        CHECK(G.dups_count == dups_before, "a failed open left a duplicate open");
         free_context(h);
     } else {
         uint8_t got[100];
@@ -1020,11 +1095,14 @@ static void second_open(int variant, int preset)
         if (n > 0)
             for (int i = 0; i < n; i++)
                 CHECK(got[i] == film_byte(i), "a second session read other bytes");
+        CHECK(G.dups_count == dups_before + 2, "an open session holds other than two duplicates");
         begin_op();
         ffurl_closep(&h);
         end_op();
-        CHECK(closed_by_protocol(read_fd) && closed_by_protocol(write_fd) &&
-              G.closed_count == 2, "a second session's close did not close both descriptors");
+        CHECK(G.dups_count == dups_before && G.closed_count == 2,
+              "a second session's close did not close both its duplicates");
+        check_caller(read_fd, fl[0], fd_flags[0], "a second session's close closed its read descriptor");
+        check_caller(write_fd, fl[1], fd_flags[1], "a second session's close closed its write descriptor");
     }
     if (!G.disturbed && !G.inject_period) {
         int result = -1, dones = second_dones(b[0], &result);
@@ -1036,8 +1114,6 @@ static void second_open(int variant, int preset)
             CHECK(ret == 0 && dones == 1 && result == 0, "a good second session without DONE OK");
         }
     }
-    a[0] = (read_fd == a[0]) ? -1 : a[0];
-    b[1] = (write_fd == b[1]) ? -1 : b[1];
 end:
     for (int i = 0; i < 2; i++) {
         if (a[i] >= 0 && is_open(a[i]))
@@ -1135,12 +1211,16 @@ static void parent_op(uint8_t a, uint8_t b)
     case 2: p->draining = 0; p->drain_resume = 0; G.disturbed = 1; break;
     case 3: close_to(p); G.disturbed = 1; break;
     case 4:
-        if (p->ffmpeg_read >= 0)
+        if (p->ffmpeg_read >= 0) {
             fcntl(p->ffmpeg_read, F_SETFL, fcntl(p->ffmpeg_read, F_GETFL) | O_NONBLOCK);
+            G.caller_fl[0] = fcntl(p->ffmpeg_read, F_GETFL);
+        }
         break;
     case 5:
-        if (p->ffmpeg_write >= 0)
+        if (p->ffmpeg_write >= 0) {
             fcntl(p->ffmpeg_write, F_SETFL, fcntl(p->ffmpeg_write, F_GETFL) | O_NONBLOCK);
+            G.caller_fl[1] = fcntl(p->ffmpeg_write, F_GETFL);
+        }
         break;
     default:
         p->draining = 1;
@@ -1273,9 +1353,9 @@ static void read_header_bytes(const uint8_t *h)
          G.block > FFS_LARGEST_BODY || G.longest < G.block || G.longest > FFS_LARGEST_BODY ||
          G.outstanding < 1 || G.outstanding > FFS_OUTSTANDING_CAP);
     if (G.hello_sequence || G.hello_lowest < 1 || G.hello_highest < 1 || G.hello_lowest > 1)
-        G.expect_open = AVERROR(EPROTO);
+        G.expect_open = AVERROR_INVALIDDATA;
     else if (G.request_malformed)
-        G.expect_open = AVERROR(EPROTO);
+        G.expect_open = AVERROR_INVALIDDATA;
     else if (G.request_invalid)
         G.expect_open = AVERROR(EINVAL);
     else
@@ -1286,6 +1366,11 @@ static void setup_parent(Parent *p, const uint8_t *h, int read_fd, int write_fd)
 {
     p->ffmpeg_read = read_fd;
     p->ffmpeg_write = write_fd;
+    p->dup_read = p->dup_write = -1;
+    G.caller_fl[0] = fcntl(read_fd, F_GETFL);
+    G.caller_fd_flags[0] = fcntl(read_fd, F_GETFD);
+    G.caller_fl[1] = fcntl(write_fd, F_GETFL);
+    G.caller_fd_flags[1] = fcntl(write_fd, F_GETFD);
     /* Bytes per pass: down to one, but no more than some 2,048 passes for a block. */
     p->base_chunk = p->chunk = FFMAX(1 << (h[6] % 17), G.block / 2048);
     p->draining = 1;
@@ -1329,19 +1414,19 @@ static void finish_session(int open_ret, int read_fd, int write_fd)
         }
     }
     (void)open_ret;
-    CHECK(closed_by_protocol(read_fd) && closed_by_protocol(write_fd),
-          "the session ended without closing both its descriptors");
-    for (int i = 0; i < G.closed_count; i++)
-        CHECK(G.closed_fds[i] == read_fd || G.closed_fds[i] == write_fd,
-              "the session closed a descriptor not its own");
-    p->ffmpeg_read = p->ffmpeg_write = -1;
+    /* Second sessions end within their own op, so every duplicate open now is the main one's. */
+    CHECK(G.dups_count == 0 && p->dup_read < 0 && p->dup_write < 0,
+          "the session ended without closing both its duplicates");
+    check_caller(read_fd, G.caller_fl[0], G.caller_fd_flags[0],
+                 "the session's end closed the caller's read descriptor");
+    check_caller(write_fd, G.caller_fl[1], G.caller_fd_flags[1],
+                 "the session's end closed the caller's write descriptor");
 }
 
 int LLVMFuzzerInitialize(int *argc, char ***argv)
 {
-    struct sigaction action = { .sa_handler = sigpipe_delivered };
     av_log_set_level(AV_LOG_QUIET);
-    sigaction(SIGPIPE, &action, NULL);
+    signal(SIGPIPE, SIG_IGN);   /* as ffmpeg and ffprobe do: a parent gone is EPIPE, a fault */
     /* 1: a line for each input, for seeds; 2: and each system call the protocol makes. */
     G.trace = getenv("FFSTREAMER_FUZZ_TRACE") ? atoi(getenv("FFSTREAMER_FUZZ_TRACE")) : 0;
     G.buffer = av_malloc(BUFFER_BYTES);
@@ -1366,6 +1451,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         clock_gettime(CLOCK_MONOTONIC, &started);
     G.fault_back = -1;
     G.p.to_w = G.p.from_r = G.p.junk_w = G.p.ffmpeg_read = G.p.ffmpeg_write = -1;
+    G.p.dup_read = G.p.dup_write = -1;
     for (int i = 0; i < HEADER_BYTES; i++)
         header[i] = byte_at(data, size, i);
     read_header_bytes(header);
@@ -1421,14 +1507,14 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     }
 
     G.main_h = make_context("ffstreamer:", AVIO_FLAG_READ, read_fd, write_fd, G.cache_requested);
-    if (!G.main_h) {
-        close(read_fd);
-        close(write_fd);
+    if (!G.main_h)
         goto end;
-    }
     begin_op();
+    G.main_opening = 1;
     ret = ffurl_connect(G.main_h, NULL);
+    G.main_opening = 0;
     end_op();
+    CHECK(ret != AVERROR(EAGAIN) && ret != AVERROR_EOF, "an open returned EAGAIN or end of file");
     if (G.inject_period || G.interrupt_at)
         G.disturbed = 1;
     if (ret < 0) {
@@ -1445,10 +1531,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         CHECK(G.expect_open == 0, "an open succeeded that the specification refuses");
     {
         FFStreamerContext *c = G.main_h->priv_data;
-        int fl0 = fcntl(read_fd, F_GETFL), fl1 = fcntl(write_fd, F_GETFL);
-        CHECK(!(fl0 & O_NONBLOCK) && !(fl1 & O_NONBLOCK), "the open left a descriptor non-blocking");
-        CHECK((fcntl(read_fd, F_GETFD) & FD_CLOEXEC) && (fcntl(write_fd, F_GETFD) & FD_CLOEXEC),
-              "the open left a descriptor inheritable");
+        CHECK(G.dups_count == 2 && c->read_fd == G.p.dup_read && c->write_fd == G.p.dup_write,
+              "the session does not work on two duplicates of the caller's descriptors");
+        CHECK((fcntl(c->read_fd, F_GETFD) & FD_CLOEXEC) && (fcntl(c->write_fd, F_GETFD) & FD_CLOEXEC),
+              "the session's duplicates are inheritable");
         if (!G.responsive) {
             /* A raw parent's terms are whatever the protocol accepted. */
             G.size = c->size;
@@ -1505,6 +1591,12 @@ end:
                 G.cache_effective, (int)G.block, (long)((now.tv_sec - started.tv_sec) * 1000000 +
                 (now.tv_nsec - started.tv_nsec) / 1000));
     }
+    CHECK(G.dups_count == 0, "the protocol leaked a duplicate");
+    /* The caller's descriptors are the caller's to close. */
+    if (G.p.ffmpeg_read >= 0)
+        close(G.p.ffmpeg_read);
+    if (G.p.ffmpeg_write >= 0)
+        close(G.p.ffmpeg_write);
     close_to(&G.p);
     if (G.p.from_r >= 0)
         close(G.p.from_r);

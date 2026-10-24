@@ -66,15 +66,16 @@ given.
   2.1 billion inputs, after a first long run found (and kept as a seed) a file size near the top of
   int64 that overflowed rounding up to whole blocks. That was the first harness, which fed the
   protocol bytes and checked only for crashes.
-* The session harness (2026-10-24, below): five minutes on eight workers, about 335,000 inputs,
-  clean. Twelve faults injected into the protocol, each fuzzed on one worker from no seeds at all,
-  were each found, in 0 to 446 seconds: at once, `O_NONBLOCK` kept and a prefetch past the
-  `READ`s outstanding; the sequence check removed in 61 s; LRU eviction made MRU in 90 s; the
-  interrupt checked only on idle slices in 133 s; the sticky fault dropped in 140 s; the `EAGAIN`
-  map removed in 257 s; a refused open closing its descriptors in 332 s; end of file not mapped to
-  `EIO` in 342 s; SIGPIPE left unblocked in 348 s; only the read pipe claimed in 365 s; the wait for
-  room made uninterruptible in 446 s. From the seeds, ten of them fail on a seed, and the other two
-  within the first 250 inputs.
+* The session harness (2026-10-24, below), against the protocol as it now stands (descriptors
+  duplicated, never the caller's touched): five minutes on eight workers, about 193,000 inputs,
+  clean. Thirteen faults injected into the protocol, each fuzzed on one worker from no seeds at
+  all, were each found, in 0 to 231 seconds: at once, the caller's descriptor closed, a duplicate
+  leaked, `O_NONBLOCK` cleared on the caller's descriptor, and a prefetch past the `READ`s
+  outstanding; the sequence check removed in 40 s; LRU eviction made MRU in 65 s; the interrupt
+  checked only on idle slices in 68 s; the sticky fault dropped in 105 s; the `EAGAIN` map removed
+  from a read in 152 s, and from the open in 154 s; end of file not mapped to `EIO` in 163 s; only
+  the read pipe claimed in 208 s; the wait for room made uninterruptible in 231 s. From the seeds,
+  ten of them fail on a seed.
 
 ### Also checked
 
@@ -122,16 +123,17 @@ of system calls; and which system calls fail (`EINTR`, `EAGAIN`, `EIO`, `ENOMEM`
 reads of any size and seeks of any whence, through the protocol, FFmpeg's URL layer or avio; second
 opens that share the live session's pipes (`EBUSY`), are refused for their descriptors or URL, or
 open fresh pipes; the parent closing or filling a pipe mid-session. The protocol's `poll`, `read`,
-`write` and `close` go through the harness, which plays the parent between the protocol's steps and
-never sleeps: a silent 100 ms slice is counted, not waited, so an input runs in milliseconds and
+`write`, `close`, `fcntl` and `dup` go through the harness, which so knows every descriptor the
+protocol duplicates and closes, plays the parent between the protocol's steps, and never sleeps: a silent 100 ms slice is counted, not waited, so an input runs in milliseconds and
 always the same way. It aborts on any breach of the specification: a read returning 0, `EAGAIN` or
 bytes other than the file's; a fault that is not sticky, or end of file before the end; a seek's
 answer; a `READ` that is misaligned, outstanding past the terms, after a fault, or for a block
 least-recently-used eviction keeps; frames out of sequence or after `DONE`; `DONE` not sent exactly
-once, or not carrying the fault's kind and code; an open's outcome against its terms; descriptors
-closed by a refused open, left open by a failed or closed one, or left non-blocking; SIGPIPE
-delivered or left pending; the protocol waiting on once the interrupt has fired, or spinning; a
-descriptor leaked. `FFSTREAMER_FUZZ_TRACE=1` prints a line for each input it runs, and `=2` each
+once, or not carrying the fault's kind and code; an open's outcome against its terms, or an open
+returning `EAGAIN` or end of file; a caller's descriptor closed or its flags changed by any open,
+refused, failed or closed; a session not working on two close-on-exec duplicates, closing a
+descriptor it did not make or one twice, or leaving a duplicate open; the protocol waiting on once
+the interrupt has fired, or spinning; a descriptor leaked. `FFSTREAMER_FUZZ_TRACE=1` prints a line for each input it runs, and `=2` each
 system call too. `make test-claims` builds `test/claims_test.c` the same way and runs it.
 
 `make test-upstream` builds FFmpeg at `UPSTREAM_COMMIT` with the series and nothing else enabled, in
