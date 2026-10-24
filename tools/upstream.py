@@ -271,11 +271,7 @@ def check_against_patches(tree, base, paths):
     for name in ("9000-fdproxy-protocol.patch", "9001-fftools-input-errors.patch"):
         jellyfin.update(added_lines(read(os.path.join("patches", name)), paths))
     for path in paths:
-        # The jellyfin patch also counts the protocol's name before 2026-10-24 as local, for this
-        # repository's users alone; FFmpeg's tree has only fdproxy.
-        def code(lines):
-            return " ".join(" ".join(lines or []).split()).replace(' && strcmp(proto, "ffstreamer")', "")
-        if code(ours.get(path)) != code(jellyfin.get(path)):
+        if ours.get(path) != jellyfin.get(path):
             raise SystemExit(f"{path}: the series adds other lines than patches/ do; change both")
 
 

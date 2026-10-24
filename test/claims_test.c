@@ -110,6 +110,7 @@ static int open_session(Session *s)
     c->read_fd_option  = s->ffmpeg_read;
     c->write_fd_option = s->ffmpeg_write;
     s->h->priv_data = c;
+    s->h->prot = &test_fdproxy_protocol;
     return fdproxy_open(s->h, "fdproxy:", AVIO_FLAG_READ);
 }
 

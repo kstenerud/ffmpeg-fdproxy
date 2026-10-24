@@ -261,11 +261,17 @@ static int write_frame(URLContext *h, uint8_t type, const uint8_t *body,
     if (body_length)
         memcpy(frame + FDP_HEADER_BYTES, body, body_length);
 
-    do {
+    for (;;) {
         if ((ret = wait_for_room(h)) < 0)
             return ret;
         written = write(c->write_fd, frame, FDP_HEADER_BYTES + body_length);
-    } while (written < 0 && (errno == EINTR || errno == EAGAIN));
+        if (written >= 0 || (errno != EINTR && errno != EAGAIN))
+            break;
+        /* A try that found room writes even once interrupted, so the close's
+         * DONE goes out; one that failed only tries again if not. */
+        if (ff_check_interrupt(&h->interrupt_callback))
+            return AVERROR_EXIT;
+    }
 
     if (written < 0)
         return AVERROR(errno);
@@ -522,16 +528,14 @@ static int fdproxy_open(URLContext *h, const char *url, int flags)
     uint8_t body[9];
     int8_t capability_sequence;
     int64_t blocks_in_file;
-    const char *rest;
     int version, ret;
 
     /* The session works on duplicates of the caller's descriptors, as fd:
      * does, and never closes or changes the caller's: whatever the outcome,
      * they are the caller's to close. */
     c->read_fd = c->write_fd = -1;
-    if (!av_strstart(url, h->prot->name, &rest) || strcmp(rest, ":")) {
-        av_log(h, AV_LOG_ERROR, "The URL must be exactly \"%s:\"\n",
-               h->prot->name);
+    if (strcmp(url, "fdproxy:")) {
+        av_log(h, AV_LOG_ERROR, "The URL must be exactly \"fdproxy:\"\n");
         return AVERROR(EINVAL);
     }
     if (flags & AVIO_FLAG_WRITE)
@@ -788,11 +792,6 @@ static const AVOption fdproxy_options[] = {
     { "read_fd",      "The descriptor the parent's messages arrive on", OFFSET(read_fd_option),  AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, D },
     { "write_fd",     "The descriptor this side's messages go out on",  OFFSET(write_fd_option), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, D },
     { "cache_blocks", "How many of the parent's blocks to keep",        OFFSET(cache_blocks),    AV_OPT_TYPE_INT, { .i64 = 32 },  2,  1024,    D },
-    /* ffmpeg-fdproxy only: the names before 2026-10-24, until its users move. */
-    { "ffstreamer_read_fd",      "Deprecated, use read_fd",      OFFSET(read_fd_option),  AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, D },
-    { "ffstreamer_write_fd",     "Deprecated, use write_fd",     OFFSET(write_fd_option), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, D },
-    { "ffstreamer_cache_blocks", "Deprecated, use cache_blocks", OFFSET(cache_blocks),    AV_OPT_TYPE_INT, { .i64 = 32 },  2,  1024,    D },
-    /* ffmpeg-fdproxy only: end. */
     { NULL }
 };
 
@@ -813,16 +812,3 @@ const URLProtocol ff_fdproxy_protocol = {
     .priv_data_class     = &fdproxy_class,
     .default_whitelist   = "fdproxy",
 };
-
-/* ffmpeg-fdproxy only: the protocol under its name before 2026-10-24, until its users move. */
-const URLProtocol ff_ffstreamer_protocol = {
-    .name                = "ffstreamer",
-    .url_open            = fdproxy_open,
-    .url_read            = fdproxy_read,
-    .url_seek            = fdproxy_seek,
-    .url_close           = fdproxy_close,
-    .priv_data_size      = sizeof(FDProxyContext),
-    .priv_data_class     = &fdproxy_class,
-    .default_whitelist   = "ffstreamer",
-};
-/* ffmpeg-fdproxy only: end. */

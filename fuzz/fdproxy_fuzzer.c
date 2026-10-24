@@ -722,6 +722,10 @@ static ssize_t hook_write(int fd, const void *buffer, size_t length)
             G.write_injected = 1;
             G.lossy = 1;
         }
+        /* Once the interrupt is raised, a write that must be tried again gives up instead, and
+         * the DONE it was for is lost, as for a wait for room. */
+        if (G.latched)
+            G.lossy = 1;
         trace_call("write", fd, -1, error);
         errno = error;
         return -1;

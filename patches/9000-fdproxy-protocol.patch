@@ -1,6 +1,6 @@
 --- a/libavformat/fdproxy.c
 +++ b/libavformat/fdproxy.c
-@@ -0,0 +1,828 @@
+@@ -0,0 +1,814 @@
 +/*
 + * fdproxy: reads an input whose every byte a parent process serves over
 + * two inherited pipes, by offset. See fdproxy-specification.md in the
@@ -264,11 +264,17 @@
 +    if (body_length)
 +        memcpy(frame + FDP_HEADER_BYTES, body, body_length);
 +
-+    do {
++    for (;;) {
 +        if ((ret = wait_for_room(h)) < 0)
 +            return ret;
 +        written = write(c->write_fd, frame, FDP_HEADER_BYTES + body_length);
-+    } while (written < 0 && (errno == EINTR || errno == EAGAIN));
++        if (written >= 0 || (errno != EINTR && errno != EAGAIN))
++            break;
++        /* A try that found room writes even once interrupted, so the close's
++         * DONE goes out; one that failed only tries again if not. */
++        if (ff_check_interrupt(&h->interrupt_callback))
++            return AVERROR_EXIT;
++    }
 +
 +    if (written < 0)
 +        return AVERROR(errno);
@@ -525,16 +531,14 @@
 +    uint8_t body[9];
 +    int8_t capability_sequence;
 +    int64_t blocks_in_file;
-+    const char *rest;
 +    int version, ret;
 +
 +    /* The session works on duplicates of the caller's descriptors, as fd:
 +     * does, and never closes or changes the caller's: whatever the outcome,
 +     * they are the caller's to close. */
 +    c->read_fd = c->write_fd = -1;
-+    if (!av_strstart(url, h->prot->name, &rest) || strcmp(rest, ":")) {
-+        av_log(h, AV_LOG_ERROR, "The URL must be exactly \"%s:\"\n",
-+               h->prot->name);
++    if (strcmp(url, "fdproxy:")) {
++        av_log(h, AV_LOG_ERROR, "The URL must be exactly \"fdproxy:\"\n");
 +        return AVERROR(EINVAL);
 +    }
 +    if (flags & AVIO_FLAG_WRITE)
@@ -791,11 +795,6 @@
 +    { "read_fd",      "The descriptor the parent's messages arrive on", OFFSET(read_fd_option),  AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, D },
 +    { "write_fd",     "The descriptor this side's messages go out on",  OFFSET(write_fd_option), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, D },
 +    { "cache_blocks", "How many of the parent's blocks to keep",        OFFSET(cache_blocks),    AV_OPT_TYPE_INT, { .i64 = 32 },  2,  1024,    D },
-+    /* ffmpeg-fdproxy only: the names before 2026-10-24, until its users move. */
-+    { "ffstreamer_read_fd",      "Deprecated, use read_fd",      OFFSET(read_fd_option),  AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, D },
-+    { "ffstreamer_write_fd",     "Deprecated, use write_fd",     OFFSET(write_fd_option), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, D },
-+    { "ffstreamer_cache_blocks", "Deprecated, use cache_blocks", OFFSET(cache_blocks),    AV_OPT_TYPE_INT, { .i64 = 32 },  2,  1024,    D },
-+    /* ffmpeg-fdproxy only: end. */
 +    { NULL }
 +};
 +
@@ -816,55 +815,39 @@
 +    .priv_data_class     = &fdproxy_class,
 +    .default_whitelist   = "fdproxy",
 +};
-+
-+/* ffmpeg-fdproxy only: the protocol under its name before 2026-10-24, until its users move. */
-+const URLProtocol ff_ffstreamer_protocol = {
-+    .name                = "ffstreamer",
-+    .url_open            = fdproxy_open,
-+    .url_read            = fdproxy_read,
-+    .url_seek            = fdproxy_seek,
-+    .url_close           = fdproxy_close,
-+    .priv_data_size      = sizeof(FDProxyContext),
-+    .priv_data_class     = &fdproxy_class,
-+    .default_whitelist   = "ffstreamer",
-+};
-+/* ffmpeg-fdproxy only: end. */
 --- a/libavformat/protocols.c
 +++ b/libavformat/protocols.c
-@@ -33,6 +33,8 @@
+@@ -33,6 +33,7 @@
  extern const URLProtocol ff_crypto_protocol;
  extern const URLProtocol ff_data_protocol;
  extern const URLProtocol ff_fd_protocol;
 +extern const URLProtocol ff_fdproxy_protocol;
-+extern const URLProtocol ff_ffstreamer_protocol;
  extern const URLProtocol ff_ffrtmpcrypt_protocol;
  extern const URLProtocol ff_ffrtmphttp_protocol;
  extern const URLProtocol ff_file_protocol;
 --- a/libavformat/Makefile
 +++ b/libavformat/Makefile
-@@ -688,6 +688,8 @@
+@@ -688,6 +688,7 @@
  OBJS-$(CONFIG_FFRTMPHTTP_PROTOCOL)       += rtmphttp.o
  OBJS-$(CONFIG_FILE_PROTOCOL)             += file.o
  OBJS-$(CONFIG_FD_PROTOCOL)               += file.o
 +OBJS-$(CONFIG_FDPROXY_PROTOCOL)          += fdproxy.o
-+OBJS-$(CONFIG_FFSTREAMER_PROTOCOL)       += fdproxy.o
  OBJS-$(CONFIG_FTP_PROTOCOL)              += ftp.o
  OBJS-$(CONFIG_GOPHER_PROTOCOL)           += gopher.o
  OBJS-$(CONFIG_GOPHERS_PROTOCOL)          += gopher.o
 --- a/configure
 +++ b/configure
-@@ -4049,6 +4049,8 @@
+@@ -4049,6 +4049,7 @@
  ffrtmpcrypt_protocol_select="tcp_protocol"
  ffrtmphttp_protocol_conflict="librtmp_protocol"
  ffrtmphttp_protocol_select="http_protocol"
 +fdproxy_protocol_deps="poll_h"
-+ffstreamer_protocol_deps="poll_h"
  ftp_protocol_select="tcp_protocol"
  gopher_protocol_select="tcp_protocol"
  gophers_protocol_select="tls_protocol"
 --- a/libavformat/seek.c
 +++ b/libavformat/seek.c
-@@ -189,7 +189,12 @@
+@@ -189,7 +189,11 @@
                 "optimally without knowing the protocol\n");
      }
  
@@ -873,8 +856,7 @@
 +     * costs nothing, and reading forward in place of one would read
 +     * megabytes it never needed. */
 +    if (proto && !(strcmp(proto, "file") && strcmp(proto, "pipe") &&
-+                   strcmp(proto, "cache") && strcmp(proto, "fdproxy") &&
-+                   strcmp(proto, "ffstreamer")))
++                   strcmp(proto, "cache") && strcmp(proto, "fdproxy")))
          return;
  
      for (unsigned ist1 = 0; ist1 < s->nb_streams; ist1++) {

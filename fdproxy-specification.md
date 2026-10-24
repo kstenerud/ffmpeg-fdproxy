@@ -210,11 +210,6 @@ Each input restricts itself to this protocol and names its channel:
 | `-write_fd`     | The descriptor FFmpeg writes its own messages to. Default -1.                                  |
 | `-cache_blocks` | How many blocks FFmpeg's side keeps ([Reading in Blocks](#reading-in-blocks)), 2 to 1,024. Default 32. |
 
-ffmpeg-fdproxy's build also takes the names before 2026-10-24, when the protocol was called
-ffstreamer: the URL `ffstreamer:`, the protocol `ffstreamer` in a whitelist, and the options
-`-ffstreamer_read_fd`, `-ffstreamer_write_fd` and `-ffstreamer_cache_blocks`, until its users have
-moved; FFmpeg's own tree takes only the names above.
-
 * The options are decoding options. An open with either descriptor left at -1, both the same
   descriptor, or either of them stdin, stdout or stderr **MUST** fail.
 * The URL **MUST** be exactly `fdproxy:`, with nothing after it, so a relative reference resolved

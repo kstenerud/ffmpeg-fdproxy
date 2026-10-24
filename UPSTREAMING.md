@@ -173,7 +173,7 @@ Each waits until after Orpheum's beta, and none commits anyone to anything until
 | --- | --- |
 | Send the series at all | Parked. Rejection is acceptable: the patches are carried on jellyfin-ffmpeg either way. |
 | A MAINTAINERS entry | Parked (the owner, 2026-10-24). FFmpeg asks who adds a protocol to maintain it; no one takes that on during the beta. |
-| The protocol's name | Decided (the owner, 2026-10-24): `fdproxy`, renamed from `ffstreamer`, since in FFmpeg "ff" marks a format FFmpeg invented and owns (`ffv1`, `ffmetadata`, `ffconcat`) or an internal helper no one names (`ffrtmphttp`), never an outside-defined protocol users name (docs/research/ff-prefix-names.md). The jellyfin patches keep the old name as an alias until their users move; the series for FFmpeg carries only `fdproxy`. |
+| The protocol's name | Decided (the owner, 2026-10-24): `fdproxy`, renamed from `ffstreamer`, since in FFmpeg "ff" marks a format FFmpeg invented and owns (`ffv1`, `ffmetadata`, `ffconcat`) or an internal helper no one names (`ffrtmphttp`), never an outside-defined protocol users name (docs/research/ff-prefix-names.md). |
 | `Signed-off-by` | Added by the sender, when sending. |
 | Disclosing AI assistance | Parked; FFmpeg's policy discussion was unresolved when last checked (2026-10-23). |
 | The fftools default | Proposed as the default, opt-in ready (see [The Series](#the-series)). |

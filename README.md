@@ -1,7 +1,6 @@
 # FFmpeg + fdproxy
 
-Named ffmpeg-ffstreamer, and its protocol `ffstreamer`, until 2026-10-24; this repository's builds
-still take the old names beside the new.
+Named ffmpeg-ffstreamer, and its protocol `ffstreamer`, until 2026-10-24.
 
 fdproxy is a new way to feed data into FFmpeg in a security-constrained environment. These
 patches on top of [jellyfin-ffmpeg](https://github.com/jellyfin/jellyfin-ffmpeg) add `fdproxy`,
