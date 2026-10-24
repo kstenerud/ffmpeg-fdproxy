@@ -64,7 +64,17 @@ given.
 
 * FFmpeg's side, under AddressSanitizer and UndefinedBehaviorSanitizer: four hours on eight workers,
   2.1 billion inputs, after a first long run found (and kept as a seed) a file size near the top of
-  int64 that overflowed rounding up to whole blocks.
+  int64 that overflowed rounding up to whole blocks. That was the first harness, which fed the
+  protocol bytes and checked only for crashes.
+* The session harness (2026-10-24, below): five minutes on eight workers, about 335,000 inputs,
+  clean. Twelve faults injected into the protocol, each fuzzed on one worker from no seeds at all,
+  were each found, in 0 to 446 seconds: at once, `O_NONBLOCK` kept and a prefetch past the
+  `READ`s outstanding; the sequence check removed in 61 s; LRU eviction made MRU in 90 s; the
+  interrupt checked only on idle slices in 133 s; the sticky fault dropped in 140 s; the `EAGAIN`
+  map removed in 257 s; a refused open closing its descriptors in 332 s; end of file not mapped to
+  `EIO` in 342 s; SIGPIPE left unblocked in 348 s; only the read pipe claimed in 365 s; the wait for
+  room made uninterruptible in 446 s. From the seeds, ten of them fail on a seed, and the other two
+  within the first 250 inputs.
 
 ### Also checked
 
@@ -100,11 +110,29 @@ needs Docker. The first build makes its toolchain image, an hour or more; later 
 chapters, as Matroska and as MP4 with its index at the end. They take a minute and 240 MB. The suite
 takes any films with those four streams in that order (`MEDIA=<dir>`).
 
-`make fuzz` builds `fuzz/ffstreamer_fuzzer.c`, a libFuzzer harness that feeds the protocol arbitrary
-bytes as the parent's frames, with AddressSanitizer and UndefinedBehaviorSanitizer, against a minimal
-FFmpeg built the same way, and runs it on eight workers from the seeds in `fuzz/corpus/`
-(`fuzz/make_corpus.py` writes them), then makes seeks at the edges of the arithmetic.
-`make test-claims` builds `test/claims_test.c` the same way and runs it.
+`make fuzz` builds `fuzz/ffstreamer_fuzzer.c`, a libFuzzer harness of FFmpeg's side, with
+AddressSanitizer and UndefinedBehaviorSanitizer, against a minimal FFmpeg built the same way, and
+runs it on eight workers from the seeds in `fuzz/corpus/` (`fuzz/make_corpus.py` writes them). Each
+input drives a whole session. Its header chooses the parent: one that answers each `READ` (rightly,
+by dribs, slowly, with the wrong number, type or length, short, or not at all) or one that sends the
+input's own bytes; the terms, block size up to 1 MiB, `READ`s outstanding and `cache_blocks` up to
+64; whether the pipe of requests is a page, filled and left unread for a while or for ever, or
+closed (`EPIPE`); whether the descriptors arrive non-blocking; when the interrupt fires, by a count
+of system calls; and which system calls fail (`EINTR`, `EAGAIN`, `EIO`, `ENOMEM`). A script follows:
+reads of any size and seeks of any whence, through the protocol, FFmpeg's URL layer or avio; second
+opens that share the live session's pipes (`EBUSY`), are refused for their descriptors or URL, or
+open fresh pipes; the parent closing or filling a pipe mid-session. The protocol's `poll`, `read`,
+`write` and `close` go through the harness, which plays the parent between the protocol's steps and
+never sleeps: a silent 100 ms slice is counted, not waited, so an input runs in milliseconds and
+always the same way. It aborts on any breach of the specification: a read returning 0, `EAGAIN` or
+bytes other than the file's; a fault that is not sticky, or end of file before the end; a seek's
+answer; a `READ` that is misaligned, outstanding past the terms, after a fault, or for a block
+least-recently-used eviction keeps; frames out of sequence or after `DONE`; `DONE` not sent exactly
+once, or not carrying the fault's kind and code; an open's outcome against its terms; descriptors
+closed by a refused open, left open by a failed or closed one, or left non-blocking; SIGPIPE
+delivered or left pending; the protocol waiting on once the interrupt has fired, or spinning; a
+descriptor leaked. `FFSTREAMER_FUZZ_TRACE=1` prints a line for each input it runs, and `=2` each
+system call too. `make test-claims` builds `test/claims_test.c` the same way and runs it.
 
 `make test-upstream` builds FFmpeg at `UPSTREAM_COMMIT` with the series and nothing else enabled, in
 Docker, fails on any warning in the series' files, builds the protocols manual, and runs

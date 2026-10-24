@@ -67,11 +67,11 @@ test-upstream: ## Make the series, then build it and run its FATE test and the p
 	tools/upstream.sh --test build/upstream
 
 .PHONY: fuzz
-fuzz: checkout ## Fuzz FFmpeg's side for FUZZ_SECONDS (default 600) on FUZZ_JOBS workers under ASan and UBSan
+fuzz: checkout ## Fuzz FFmpeg's side for FUZZ_SECONDS (default 600) on FUZZ_JOBS workers under ASan and UBSan, checking the specification's invariants
 	fuzz/build.sh build/jellyfin-ffmpeg build/fuzz
 	rm -rf build/fuzz/corpus && mkdir -p build/fuzz/corpus && cp fuzz/corpus/* build/fuzz/corpus/
 	docker run --rm -v "$$PWD/build/fuzz":/work -w /work debian:trixie \
-		./ffstreamer_fuzzer -max_len=61440 -max_total_time=$(FUZZ_SECONDS) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS) corpus
+		./ffstreamer_fuzzer -max_len=16384 -timeout=10 -max_total_time=$(FUZZ_SECONDS) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS) corpus
 	@! ls build/fuzz/crash-* build/fuzz/leak-* build/fuzz/timeout-* build/fuzz/oom-* 2>/dev/null
 
 .PHONY: clean

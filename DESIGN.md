@@ -201,15 +201,29 @@ Testing
     * every run shape that reads a file, read directly and through the protocol and compared byte for
       byte: probe, read-through, subtitle extraction, chunk copy, encode and sound;
     * every failure path, each with the `DONE` and exit status it must give.
-* **The fuzz harness** (`fuzz/`): arbitrary bytes as the parent's frames, under AddressSanitizer and
-  UndefinedBehaviorSanitizer, with seeks at the edges of the arithmetic; five minutes on every change
-  and five hours a week in CI.
+* **The fuzz harness** (`fuzz/`), under AddressSanitizer and UndefinedBehaviorSanitizer; five
+  minutes on every change and five hours a week in CI. Each input is a whole session: a header
+  chooses the parent (answering each `READ` rightly, slowly, by dribs, wrongly or never, or sending
+  the input's raw bytes), the terms, the cache, the pipe of requests (a page, full, unread, closed),
+  when the interrupt fires and which system calls fail; a script of reads, seeks, second opens and
+  the parent's own moves follows, through the protocol, FFmpeg's URL layer or avio. The harness
+  takes the protocol's `poll`, `read`, `write` and `close`, plays the parent between its steps, and
+  counts a silent slice instead of waiting it, so no input depends on the clock. It checks the
+  specification's invariants as it goes, the bytes of every read against the file among them, and
+  aborts on a breach ([README](README.md#building) lists them). Each of these faults injected into
+  the protocol is found: the interrupt checked only on idle slices, a refused open closing its
+  descriptors, only the read pipe claimed, LRU eviction made MRU, the sticky fault dropped, SIGPIPE
+  left unblocked, end of file not mapped to `EIO`, `O_NONBLOCK` kept, the wait for room made
+  uninterruptible, the sequence check removed, a prefetch past the `READ`s outstanding, and the
+  `EAGAIN` map removed (README's Fuzzing gives the times).
 * **Still to cover:**
     * two inputs, one choked by fftools' scheduler while the other is served;
     * a dead share: a storage read that never returns (a FUSE file) must leave FFmpeg killable at
       every point, and the run must end at the read's deadline;
     * repeated SIGSTOP and SIGCONT while the channel waits;
-    * an interrupt during the open, during `read_header`, during probing and mid-run;
+    * an interrupt during `read_header` and during probing, with a real demuxer above the protocol:
+      the fuzzer fires it during the open and at any system call mid-run, but reads through avio
+      alone;
     * hardware encoders under the seccomp filter: NVENC passes; VAAPI and QSV are untested.
 
 
