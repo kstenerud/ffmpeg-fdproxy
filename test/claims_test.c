@@ -26,6 +26,7 @@
 #define ff_ffstreamer_protocol test_ffstreamer_protocol
 #include "libavformat/ffstreamer.c"
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 
