@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that the grammar embedded in ffstreamer-specification.md is ffstreamer.dogma, as it must be.
+"""Check that the grammar embedded in fdproxy-specification.md is fdproxy.dogma, as it must be.
 
     check_spec.py
 
@@ -7,8 +7,8 @@ It needs nothing but Python."""
 import os, sys
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SPEC = os.path.join(HERE, "ffstreamer-specification.md")
-GRAMMAR = os.path.join(HERE, "ffstreamer.dogma")
+SPEC = os.path.join(HERE, "fdproxy-specification.md")
+GRAMMAR = os.path.join(HERE, "fdproxy.dogma")
 
 
 def main():
@@ -22,9 +22,9 @@ def main():
         print(f"{SPEC}: no ```dogma block", file=sys.stderr)
         return 1
     if spec[start + len("```dogma\n"):end] != grammar:
-        print("the specification's grammar differs from ffstreamer.dogma: copy the file into it", file=sys.stderr)
+        print("the specification's grammar differs from fdproxy.dogma: copy the file into it", file=sys.stderr)
         return 1
-    print("the specification embeds ffstreamer.dogma as it stands")
+    print("the specification embeds fdproxy.dogma as it stands")
     return 0
 
 

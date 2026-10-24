@@ -1,4 +1,4 @@
-ffstreamer
+fdproxy
 ==========
 
 A protocol for feeding a file to FFmpeg through two inherited pipes, so that FFmpeg reads its input
@@ -95,7 +95,7 @@ Terms and Conventions
 | Term              | Meaning                                                                                      |
 | ----------------- | -------------------------------------------------------------------------------------------- |
 | **parent**        | The process that launches FFmpeg and serves its input, by offset.                            |
-| **FFmpeg's side** | The `ffstreamer` protocol inside FFmpeg (`libavformat/ffstreamer.c`), and the fftools change of [Exit Status](#exit-status). |
+| **FFmpeg's side** | The `fdproxy` protocol inside FFmpeg (`libavformat/fdproxy.c`), and the fftools change of [Exit Status](#exit-status). |
 | **channel**       | The two pipes that carry one input of one FFmpeg process.                                    |
 | **run**           | One FFmpeg process, from launch to exit.                                                     |
 | **violation**     | Anything FFmpeg sends that breaks this specification.                                        |
@@ -123,12 +123,12 @@ Granting FFmpeg its input by path leaves two problems:
 * **The parent can't schedule FFmpeg's reads,** which compete with every other reader of the same
   disk.
 
-ffstreamer moves every read of the input into the parent:
+fdproxy moves every read of the input into the parent:
 
 ```
 +------------------------------------+
 |              FFmpeg                |
-|   demuxer  <--  ffstreamer: input  |
+|   demuxer  <--  fdproxy: input  |
 +---------------^------------|-------+
                 |            | READ (offset, length)
            DATA |            v
@@ -145,7 +145,7 @@ ffstreamer moves every read of the input into the parent:
 * the job stays on FFmpeg's command line, where its confinement already needs it;
 * FFmpeg writes its outputs itself;
 * a run that reads bytes the parent already holds in memory (re-encoding an image, converting
-  subtitle text) **SHOULD** keep reading them from stdin. ffstreamer is for files read from
+  subtitle text) **SHOULD** keep reading them from stdin. fdproxy is for files read from
   storage.
 
 
@@ -202,7 +202,7 @@ channel: stdout carries results, and a stray write there would corrupt a channel
 
 Each input restricts itself to this protocol and names its channel:
 
-    -protocol_whitelist ffstreamer -read_fd 4 -write_fd 5 -cache_blocks 48 -i ffstreamer:
+    -protocol_whitelist fdproxy -read_fd 4 -write_fd 5 -cache_blocks 48 -i fdproxy:
 
 | Option          | Meaning                                                                                        |
 | --------------- | ---------------------------------------------------------------------------------------------- |
@@ -210,13 +210,14 @@ Each input restricts itself to this protocol and names its channel:
 | `-write_fd`     | The descriptor FFmpeg writes its own messages to. Default -1.                                  |
 | `-cache_blocks` | How many blocks FFmpeg's side keeps ([Reading in Blocks](#reading-in-blocks)), 2 to 1,024. Default 32. |
 
-ffmpeg-ffstreamer's build also takes the names before 2026-10-24, `-ffstreamer_read_fd`,
-`-ffstreamer_write_fd` and `-ffstreamer_cache_blocks`, until its users have moved; FFmpeg's own tree
-takes only the names above.
+ffmpeg-fdproxy's build also takes the names before 2026-10-24, when the protocol was called
+ffstreamer: the URL `ffstreamer:`, the protocol `ffstreamer` in a whitelist, and the options
+`-ffstreamer_read_fd`, `-ffstreamer_write_fd` and `-ffstreamer_cache_blocks`, until its users have
+moved; FFmpeg's own tree takes only the names above.
 
 * The options are decoding options. An open with either descriptor left at -1, both the same
   descriptor, or either of them stdin, stdout or stderr **MUST** fail.
-* The URL **MUST** be exactly `ffstreamer:`, with nothing after it, so a relative reference resolved
+* The URL **MUST** be exactly `fdproxy:`, with nothing after it, so a relative reference resolved
   against it cannot open.
 * The parent **MUST** name the whitelist. It reaches nested opens, so a crafted manifest naming
   `pipe:5` or `fd:` cannot read the channel's descriptor directly.
@@ -792,7 +793,7 @@ One `write()` of the whole frame, once the pipe has room for it, waited for inte
 the pipe takes it whole or not at all, blocking or not.
 
 A write to a pipe whose reader has gone raises SIGPIPE, as for any pipe FFmpeg writes. FFmpeg's side
-touches no signal: the program **MUST** ignore SIGPIPE, as `ffmpeg` does and ffmpeg-ffstreamer's
+touches no signal: the program **MUST** ignore SIGPIPE, as `ffmpeg` does and ffmpeg-fdproxy's
 `ffprobe` does, and the write then fails with `EPIPE`, a fault like any other.
 
 
@@ -846,7 +847,7 @@ Security Rules
 --------------
 
 FFmpeg reads files anyone could have crafted, so the parent **MUST** assume any FFmpeg it runs has
-been taken over. ffstreamer gives such an FFmpeg nothing but the bytes of its own input:
+been taken over. fdproxy gives such an FFmpeg nothing but the bytes of its own input:
 
 * it holds no path to the file, and opens nothing to read it;
 * it can ask only for ranges inside the file, within its terms, and only as many at once as agreed;
@@ -915,7 +916,7 @@ Formal Grammar
 The following [Dogma](https://github.com/kstenerud/dogma/blob/master/v1/dogma_v1.0.md) grammar is
 **normative**. In case of any discrepancy between the prose descriptions in this document and the
 formal grammar, the grammar takes precedence. It is also kept on its own in
-[ffstreamer.dogma](ffstreamer.dogma), which **MUST** stay identical to this copy.
+[fdproxy.dogma](fdproxy.dogma), which **MUST** stay identical to this copy.
 
 **Note**: the grammar defines the bytes on each pipe. The rules that pair the two pipes in time (the
 `READ`s outstanding), what each side does on a violation, and the checks of
@@ -923,9 +924,9 @@ formal grammar, the grammar takes precedence. It is also kept on its own in
 
 ```dogma
 dogma_v1 utf-8
-- identifier  = ffstreamer_v1
-- description = ffstreamer: the read protocol between FFmpeg and the parent that serves its input, version 1
-- reference   = ffstreamer-specification.md
+- identifier  = fdproxy_v1
+- description = fdproxy: the read protocol between FFmpeg and the parent that serves its input, version 1
+- reference   = fdproxy-specification.md
 - dogma       = https://github.com/kstenerud/dogma/blob/master/v1/dogma_v1.0.md
 
 # A channel is two pipes, one each way (Channels). This grammar describes the bytes on either
@@ -938,7 +939,7 @@ dogma_v1 utf-8
 # - that FFmpeg sends no DONE before a well-formed REQUEST has arrived (When DONE Is Sent);
 # - the checks a reader must make without overflowing (Checks Without Overflow).
 
-ffstreamer_pipe = byte_order(lsb, [
+fdproxy_pipe = byte_order(lsb, [
                     pipe = written_by_ffmpeg : ffmpeg_to_parent;
                     pipe = written_by_parent : parent_to_ffmpeg;
                   ]);

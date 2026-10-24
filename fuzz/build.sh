@@ -1,5 +1,5 @@
 #!/bin/sh
-# Builds the libFuzzer harness of ffstreamer's FFmpeg side, and test/claims_test.c, with
+# Builds the libFuzzer harness of fdproxy's FFmpeg side, and test/claims_test.c, with
 # AddressSanitizer and UndefinedBehaviorSanitizer, against a minimal FFmpeg built the same way from jellyfin-ffmpeg: either
 # checkout.sh's checkout, whose debian/patches/series it applies with quilt into OUT_DIR/src, or a tree
 # with the series already applied.
@@ -52,12 +52,12 @@ fi
 make -j"$(nproc)" libavutil/libavutil.a libavcodec/libavcodec.a libavformat/libavformat.a > make.log 2>&1 \
     || { grep -n -B2 -A6 error make.log | head -40; exit 1; }
 clang -fsanitize=address,undefined,fuzzer -fno-sanitize-recover=undefined -g -O1 \
-    -I/out/objs -I"$src" /fuzz/ffstreamer_fuzzer.c \
+    -I/out/objs -I"$src" /fuzz/fdproxy_fuzzer.c \
     libavformat/libavformat.a libavcodec/libavcodec.a libavutil/libavutil.a -lm -lpthread \
-    -o /out/ffstreamer_fuzzer
+    -o /out/fdproxy_fuzzer
 clang -fsanitize=address,undefined -fno-sanitize-recover=undefined -g -O1 \
     -I/out/objs -I"$src" /test/claims_test.c \
     libavformat/libavformat.a libavcodec/libavcodec.a libavutil/libavutil.a -lm -lpthread \
     -o /out/claims_test
-echo built /out/ffstreamer_fuzzer /out/claims_test
+echo built /out/fdproxy_fuzzer /out/claims_test
 '

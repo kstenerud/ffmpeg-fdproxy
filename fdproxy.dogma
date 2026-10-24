@@ -1,7 +1,7 @@
 dogma_v1 utf-8
-- identifier  = ffstreamer_v1
-- description = ffstreamer: the read protocol between FFmpeg and the parent that serves its input, version 1
-- reference   = ffstreamer-specification.md
+- identifier  = fdproxy_v1
+- description = fdproxy: the read protocol between FFmpeg and the parent that serves its input, version 1
+- reference   = fdproxy-specification.md
 - dogma       = https://github.com/kstenerud/dogma/blob/master/v1/dogma_v1.0.md
 
 # A channel is two pipes, one each way (Channels). This grammar describes the bytes on either
@@ -14,7 +14,7 @@ dogma_v1 utf-8
 # - that FFmpeg sends no DONE before a well-formed REQUEST has arrived (When DONE Is Sent);
 # - the checks a reader must make without overflowing (Checks Without Overflow).
 
-ffstreamer_pipe = byte_order(lsb, [
+fdproxy_pipe = byte_order(lsb, [
                     pipe = written_by_ffmpeg : ffmpeg_to_parent;
                     pipe = written_by_parent : parent_to_ffmpeg;
                   ]);

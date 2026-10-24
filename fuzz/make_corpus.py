@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Writes the fuzzer's seeds into fuzz/corpus/, in the layout fuzz/ffstreamer_fuzzer.c reads: a
+"""Writes the fuzzer's seeds into fuzz/corpus/, in the layout fuzz/fdproxy_fuzzer.c reads: a
 16-byte header, a count of 4-byte operations and the operations, a count of answer actions and the
 actions, then (for a raw parent) the bytes the parent sends as they are.
 

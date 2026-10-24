@@ -12,15 +12,15 @@ help: ## List the targets
 	@grep -E '^[a-z0-9-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-14s %s\n", $$1, $$2}'
 
 .PHONY: check-patch
-check-patch: ## Check that patches/9000 adds src/libavformat/ffstreamer.c as it stands
+check-patch: ## Check that patches/9000 adds src/libavformat/fdproxy.c as it stands
 	python3 tools/check_patch.py
 
 .PHONY: check-spec
-check-spec: ## Check that ffstreamer-specification.md embeds ffstreamer.dogma as it stands
+check-spec: ## Check that fdproxy-specification.md embeds fdproxy.dogma as it stands
 	python3 tools/check_spec.py
 
 .PHONY: patch
-patch: ## Rewrite patches/9000's ffstreamer.c from src/libavformat/ffstreamer.c, where it is edited
+patch: ## Rewrite patches/9000's fdproxy.c from src/libavformat/fdproxy.c, where it is edited
 	python3 tools/sync_patch.py
 
 .PHONY: checkout
@@ -71,7 +71,7 @@ fuzz: checkout ## Fuzz FFmpeg's side for FUZZ_SECONDS (default 600) on FUZZ_JOBS
 	fuzz/build.sh build/jellyfin-ffmpeg build/fuzz
 	rm -rf build/fuzz/corpus && mkdir -p build/fuzz/corpus && cp fuzz/corpus/* build/fuzz/corpus/
 	docker run --rm -v "$$PWD/build/fuzz":/work -w /work debian:trixie \
-		./ffstreamer_fuzzer -max_len=16384 -timeout=10 -max_total_time=$(FUZZ_SECONDS) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS) corpus
+		./fdproxy_fuzzer -max_len=16384 -timeout=10 -max_total_time=$(FUZZ_SECONDS) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS) corpus
 	@! ls build/fuzz/crash-* build/fuzz/leak-* build/fuzz/timeout-* build/fuzz/oom-* 2>/dev/null
 
 .PHONY: clean

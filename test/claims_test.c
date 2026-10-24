@@ -1,7 +1,7 @@
 /*
- * Checks the claims of ffstreamer's FFmpeg side: a pipe serves one session at a time, through
+ * Checks the claims of fdproxy's FFmpeg side: a pipe serves one session at a time, through
  * whichever descriptor reaches it, and a closed session's descriptor number serves a new pipe
- * (ffstreamer-specification.md, Opening). Built with the fuzzer by fuzz/build.sh, under
+ * (fdproxy-specification.md, Opening). Built with the fuzzer by fuzz/build.sh, under
  * AddressSanitizer and UndefinedBehaviorSanitizer; `make test-claims` builds it and runs it.
  *
  * This file is part of FFmpeg.
@@ -23,8 +23,8 @@
 
 /* The protocol itself, included so the test can call its functions directly. Its URLProtocol is
  * renamed, so the library's stays apart. */
-#define ff_ffstreamer_protocol test_ffstreamer_protocol
-#include "libavformat/ffstreamer.c"
+#define ff_fdproxy_protocol test_fdproxy_protocol
+#include "libavformat/fdproxy.c"
 
 #include <signal.h>
 #include <stdio.h>
@@ -49,13 +49,13 @@ static int write_opening(int fd)
     uint8_t frames[6 + 4 + 6 + 27];
     uint8_t *at = frames;
 
-    at[0] = FFS_HELLO;
+    at[0] = FDP_HELLO;
     at[1] = 0;
     AV_WL32(at + 2, 4);
-    AV_WL16(at + 6, FFS_VERSION_LOWEST);
-    AV_WL16(at + 8, FFS_VERSION_HIGHEST);
+    AV_WL16(at + 6, FDP_VERSION_LOWEST);
+    AV_WL16(at + 8, FDP_VERSION_HIGHEST);
     at += 10;
-    at[0] = FFS_REQUEST;
+    at[0] = FDP_REQUEST;
     at[1] = 1;
     AV_WL32(at + 2, 27);
     AV_WL16(at + 6, 1);         /* version */
@@ -96,7 +96,7 @@ static int make_pipes(Session *s)
 
 static int open_session(Session *s)
 {
-    FFStreamerContext *c;
+    FDProxyContext *c;
 
     s->h = av_mallocz(sizeof(*s->h));
     c = av_mallocz(sizeof(*c));
@@ -105,12 +105,12 @@ static int open_session(Session *s)
         av_free(c);
         return AVERROR(ENOMEM);
     }
-    c->class = &ffstreamer_class;
+    c->class = &fdproxy_class;
     av_opt_set_defaults(c);
     c->read_fd_option  = s->ffmpeg_read;
     c->write_fd_option = s->ffmpeg_write;
     s->h->priv_data = c;
-    return ffstreamer_open(s->h, "ffstreamer:", AVIO_FLAG_READ);
+    return fdproxy_open(s->h, "fdproxy:", AVIO_FLAG_READ);
 }
 
 static void free_session(Session *s)
@@ -146,7 +146,7 @@ static void test_open_pipe_refused(void)
     close(second.ffmpeg_write);
     free_session(&second);
 
-    ffstreamer_close(first.h);
+    fdproxy_close(first.h);
     close(first.ffmpeg_read);
     close(first.ffmpeg_write);
     free_session(&first);
@@ -169,7 +169,7 @@ static void test_numbers_reused(void)
             reused++;
         if (open_session(&s) >= 0) {
             opened++;
-            ffstreamer_close(s.h);
+            fdproxy_close(s.h);
         }
         close(s.ffmpeg_read);
         close(s.ffmpeg_write);

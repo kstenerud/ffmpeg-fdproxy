@@ -1,7 +1,7 @@
-ffstreamer: Design Notes
+fdproxy: Design Notes
 ========================
 
-Why the [specification](ffstreamer-specification.md) is as it is, what it rests on in FFmpeg, how it
+Why the [specification](fdproxy-specification.md) is as it is, what it rests on in FFmpeg, how it
 is tested and measured, and what is still open. The specification is normative; this document is
 not.
 
@@ -31,7 +31,7 @@ Version 1 of the protocol. The specification went through six drafts and four au
   ([audits/2026-10-22-draft-5-review.md](audits/2026-10-22-draft-5-review.md)), which judged it ready
   to implement.
 * **Since implementing it:** the file size is bounded at 2^62, after a long fuzz found an overflow
-  near the top of int64; measuring the block cache found FFmpeg taking ffstreamer for a network
+  near the top of int64; measuring the block cache found FFmpeg taking fdproxy for a network
   protocol, now counted as local, and replaced a formula that was wrong; and the specification was
   restructured, its rationale moved here.
 
@@ -144,8 +144,8 @@ Two patches, after jellyfin-ffmpeg's own series (`debian/patches/series`, applie
 
 | File                                                  | What                                            |
 | ----------------------------------------------------- | ----------------------------------------------- |
-| `libavformat/ffstreamer.c` (new; from `src/`)         | the protocol                                    |
-| `libavformat/protocols.c`, `Makefile`, `configure`    | one line each, registering it; `configure`'s `ffstreamer_protocol_deps` (`poll_h`) drops it on builds without `poll()`: win64 |
+| `libavformat/fdproxy.c` (new; from `src/`)         | the protocol                                    |
+| `libavformat/protocols.c`, `Makefile`, `configure`    | one line each, registering it; `configure`'s `fdproxy_protocol_deps` (`poll_h`) drops it on builds without `poll()`: win64 |
 | `libavformat/seek.c`                                  | one name added to the protocols FFmpeg treats as local ([The Block Cache](#the-block-cache)) |
 | `fftools/ffmpeg_demux.c`, `ffmpeg.c`, `ffprobe.c`     | the exit status of a failed read, about 15 lines |
 
@@ -164,15 +164,15 @@ Measured in [bench/RESULTS.md](bench/RESULTS.md) (`bench/interleave.py`), on fiv
 
 **The first measurements found the cache thrashing, and the cache wasn't the cause.** An 11-track
 film was served 25 times its size at 24 blocks of 1 MiB, and a prepare of a 25-track one thrashed at
-every size measured. A trace of FFmpeg's reads showed why: through ffstreamer, FFmpeg asked for 16 MB
+every size measured. A trace of FFmpeg's reads showed why: through fdproxy, FFmpeg asked for 16 MB
 at a time, and read straight through the bytes between the tracks it wanted, where reading the same
 file directly it touched 12 blocks. When FFmpeg opens an indexed file, `ff_configure_buffers_for_index`
 (`libavformat/seek.c`) takes any protocol but `file`, `pipe` and `cache` for a network one, where a
 seek costs a round trip: it enlarges the I/O buffer up to 16 MiB and has every seek of less than up to
-8 MiB read forward instead. Through ffstreamer, whose seeks cost nothing, every hop between tracks
+8 MiB read forward instead. Through fdproxy, whose seeks cost nothing, every hop between tracks
 read megabytes, and swept them through the cache.
 
-**Counting ffstreamer as local fixes it** (one line in the patch). Measured again, with the patched
+**Counting fdproxy as local fixes it** (one line in the patch). Measured again, with the patched
 release build:
 
 * a probe, a read-through, a chunk or a subtitle reads a tenth of the film or less from 16 blocks,

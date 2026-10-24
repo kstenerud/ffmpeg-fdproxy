@@ -1,5 +1,5 @@
 /*
- * Tests the ffstreamer protocol through the public avio API, against a parent
+ * Tests the fdproxy protocol through the public avio API, against a parent
  * served by a thread over two pipes: a file read through, by seeks and at
  * random through a cache of two blocks; a parent that leaves, stalls, numbers
  * a DATA wrongly or stops reading; terms the protocol refuses; descriptors
@@ -344,7 +344,7 @@ static void test_read(const uint8_t *file, uint8_t *buffer)
     fcntl(s.child_read, F_SETFL, fcntl(s.child_read, F_GETFL) | O_NONBLOCK);
     fcntl(s.child_write, F_SETFL, fcntl(s.child_write, F_GETFL) | O_NONBLOCK);
     before = open_count();
-    ret = avio_open2(&pb, "ffstreamer:", AVIO_FLAG_READ, NULL, &s.options);
+    ret = avio_open2(&pb, "fdproxy:", AVIO_FLAG_READ, NULL, &s.options);
     printf("open: %d\n", ret);
     if (ret >= 0) {
         printf("their flags left as given: %s\n",
@@ -389,7 +389,7 @@ static void test_random_reads(const uint8_t *file, uint8_t *buffer)
         return;
     }
     av_dict_set_int(&s.options, "cache_blocks", 2, 0);
-    ret = avio_open2(&pb, "ffstreamer:", AVIO_FLAG_READ | AVIO_FLAG_DIRECT,
+    ret = avio_open2(&pb, "fdproxy:", AVIO_FLAG_READ | AVIO_FLAG_DIRECT,
                      NULL, &s.options);
     printf("open: %d\n", ret);
     if (ret >= 0) {
@@ -438,7 +438,7 @@ static void test_misbehaving(const uint8_t *file, uint8_t *buffer,
     /* A stalling parent interrupts the protocol once it stalls, while the
      * protocol can only be waiting for its DATA. */
     s.parent.stalled = &stalled;
-    ret = avio_open2(&pb, "ffstreamer:", AVIO_FLAG_READ, &interrupt,
+    ret = avio_open2(&pb, "fdproxy:", AVIO_FLAG_READ, &interrupt,
                      &s.options);
     printf("open: %d\n", ret);
     if (ret >= 0) {
@@ -474,7 +474,7 @@ static void test_bad_terms(const uint8_t *file)
         return;
     }
     before = open_count();
-    ret = avio_open2(&pb, "ffstreamer:", AVIO_FLAG_READ, NULL, &s.options);
+    ret = avio_open2(&pb, "fdproxy:", AVIO_FLAG_READ, NULL, &s.options);
     printf("open refused: %s\n", yes(ret == AVERROR(EINVAL)));
     printf("its descriptors left open, and none of its own: %s\n",
            yes(is_open(s.child_read) && is_open(s.child_write) &&
@@ -496,7 +496,7 @@ static void test_no_pipe(void)
     printf("descriptors that are no pipe:\n");
     av_dict_set_int(&options, "read_fd", read_fd, 0);
     av_dict_set_int(&options, "write_fd", write_fd, 0);
-    ret = avio_open2(&pb, "ffstreamer:", AVIO_FLAG_READ, NULL, &options);
+    ret = avio_open2(&pb, "fdproxy:", AVIO_FLAG_READ, NULL, &options);
     printf("open refused: %s\n", yes(ret == AVERROR(EBADF)));
     printf("its descriptors left open: %s\n",
            yes(!close(read_fd) && !close(write_fd)));
@@ -512,7 +512,7 @@ static void refuse(const char *what, int read_fd, int write_fd, int error)
 
     av_dict_set_int(&options, "read_fd", read_fd, 0);
     av_dict_set_int(&options, "write_fd", write_fd, 0);
-    ret = avio_open2(&pb, "ffstreamer:", AVIO_FLAG_READ, NULL, &options);
+    ret = avio_open2(&pb, "fdproxy:", AVIO_FLAG_READ, NULL, &options);
     printf("%s: refused: %s\n", what, yes(ret == error));
     avio_closep(&pb);
     av_dict_free(&options);
@@ -564,7 +564,7 @@ static void test_full_pipe(void)
     av_dict_set_int(&options, "read_fd", to_child[0], 0);
     av_dict_set_int(&options, "write_fd", from_child[1], 0);
     before = open_count();
-    ret = avio_open2(&pb, "ffstreamer:", AVIO_FLAG_READ, &interrupt, &options);
+    ret = avio_open2(&pb, "fdproxy:", AVIO_FLAG_READ, &interrupt, &options);
     printf("open interrupted: %s\n", yes(ret == AVERROR_EXIT));
     printf("its descriptors left open, and none of its own: %s\n",
            yes(is_open(to_child[0]) && is_open(from_child[1]) &&
@@ -589,13 +589,13 @@ static void test_one_session_a_pipe(const uint8_t *file, uint8_t *buffer)
         printf("cannot start\n");
         return;
     }
-    ret = avio_open2(&first, "ffstreamer:", AVIO_FLAG_READ, NULL, &s.options);
+    ret = avio_open2(&first, "fdproxy:", AVIO_FLAG_READ, NULL, &s.options);
     printf("first open: %d\n", ret);
     read_copy  = dup(s.child_read);
     write_copy = dup(s.child_write);
     av_dict_set_int(&options, "read_fd", read_copy, 0);
     av_dict_set_int(&options, "write_fd", write_copy, 0);
-    ret = avio_open2(&second, "ffstreamer:", AVIO_FLAG_READ, NULL, &options);
+    ret = avio_open2(&second, "fdproxy:", AVIO_FLAG_READ, NULL, &options);
     printf("second open refused: %s\n", yes(ret == AVERROR(EBUSY)));
     printf("its descriptors left open: %s\n",
            yes(!close(read_copy) && !close(write_copy)));
@@ -610,7 +610,7 @@ static void test_one_session_a_pipe(const uint8_t *file, uint8_t *buffer)
     write_copy = dup(s.child_write);
     av_dict_set_int(&options, "read_fd", fresh[0], 0);
     av_dict_set_int(&options, "write_fd", write_copy, 0);
-    ret = avio_open2(&second, "ffstreamer:", AVIO_FLAG_READ, NULL, &options);
+    ret = avio_open2(&second, "fdproxy:", AVIO_FLAG_READ, NULL, &options);
     printf("an open sharing only its write pipe refused: %s\n",
            yes(ret == AVERROR(EBUSY)));
     printf("its descriptors left open: %s\n",

@@ -1,4 +1,4 @@
-@section ffstreamer
+@section fdproxy
 
 Read an input whose every byte a parent process serves, by offset, over two
 pipes it hands down. A sandbox that leaves FFmpeg no path to the file and no
@@ -6,10 +6,10 @@ socket then still lets it read its input: the parent decides every read, and
 storage that stops answering holds the parent, which can always end the run,
 rather than FFmpeg waiting in the kernel.
 
-The parent speaks the ffstreamer protocol, specified at
-@url{https://github.com/kstenerud/ffmpeg-ffstreamer}. It creates the two pipes,
+The parent speaks the fdproxy protocol, specified at
+@url{https://github.com/kstenerud/ffmpeg-fdproxy}. It creates the two pipes,
 hands FFmpeg one end of each, and names them with the options below. The URL is
-exactly @code{ffstreamer:}, with nothing after it. Reading only; each pipe
+exactly @code{fdproxy:}, with nothing after it. Reading only; each pipe
 serves one session at a time.
 
 Like @code{fd:}, the protocol works on duplicates of the two descriptors and
@@ -38,6 +38,6 @@ Its default whitelist is itself, so a demuxer's nested open cannot name one of
 the channel's descriptors with @code{pipe:} or @code{fd:}. A program that sets
 its own whitelist should still name only this protocol:
 @example
-ffmpeg -protocol_whitelist ffstreamer -read_fd 4 -write_fd 5 -i ffstreamer: ...
+ffmpeg -protocol_whitelist fdproxy -read_fd 4 -write_fd 5 -i fdproxy: ...
 @end example
 

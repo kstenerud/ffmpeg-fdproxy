@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""The reference parent of ffstreamer (ffstreamer-specification.md, version 1): it serves a file to an
+"""The reference parent of fdproxy (fdproxy-specification.md, version 1): it serves a file to an
 ffmpeg or ffprobe over two pipes, checks every frame the child sends, and can misbehave
 on purpose, to test the child's side.
 
     refparent.py [options] --file FILM -- ffmpeg <arguments with {INPUT} where the input goes>
 
-{INPUT} is replaced by the ffstreamer input arguments. It prints a JSON summary: the
+{INPUT} is replaced by the fdproxy input arguments. It prints a JSON summary: the
 child's exit status, its DONE, what was served, and any violation the parent saw."""
 import argparse, fcntl, json, os, select, struct, subprocess, sys, threading, time
 
@@ -47,13 +47,15 @@ class Parent:
             print(f"refparent: pipe size refused ({error}); going on at the default", file=sys.stderr)
 
     def input_arguments(self):
-        # --old-names: the options' names before 2026-10-24, which this repository's build still takes.
+        # --old-names: the protocol and its options as named before 2026-10-24, which this
+        # repository's build still takes.
         prefix = "ffstreamer_" if self.args.old_names else ""
-        return ["-protocol_whitelist", "ffstreamer",
+        protocol = "ffstreamer" if self.args.old_names else "fdproxy"
+        return ["-protocol_whitelist", protocol,
                 f"-{prefix}read_fd", str(self.child_read),
                 f"-{prefix}write_fd", str(self.child_write),
                 *([f"-{prefix}cache_blocks", str(self.args.cache_blocks)] if self.args.cache_blocks else []),
-                "-i", "ffstreamer:"]
+                "-i", f"{protocol}:"]
 
     def write(self, data):
         view = memoryview(data)

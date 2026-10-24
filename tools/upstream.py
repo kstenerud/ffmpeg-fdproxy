@@ -4,7 +4,7 @@
     upstream.py FFMPEG_TREE [fftools|protocol|all]
 
 There are two series, to be sent apart (UPSTREAMING.md, The Series): fftools, how ffmpeg and ffprobe
-end when an input's reads fail, for every input; and protocol, ffstreamer itself. Each applies to
+end when an input's reads fail, for every input; and protocol, fdproxy itself. Each applies to
 FFmpeg alone; all makes both, fftools first.
 
 FFMPEG_TREE is a clean checkout of FFmpeg (tools/upstream.sh checks out the commit UPSTREAM_COMMIT
@@ -41,12 +41,12 @@ def replace(tree, path, old, new):
 
 
 def copy(tree, source, path):
-    """Copies source into the tree, without what is between the markers "ffmpeg-ffstreamer only:" and
-    "ffmpeg-ffstreamer only: end.", which serves only this repository's users."""
+    """Copies source into the tree, without what is between the markers "ffmpeg-fdproxy only:" and
+    "ffmpeg-fdproxy only: end.", which serves only this repository's users."""
     os.makedirs(os.path.dirname(os.path.join(tree, path)), exist_ok=True)
     kept, skipping = [], False
     for line in read(source).splitlines(keepends=True):
-        if "ffmpeg-ffstreamer only:" in line:
+        if "ffmpeg-fdproxy only:" in line:
             skipping = not line.rstrip().endswith("end. */")
             continue
         if not skipping:
@@ -61,15 +61,15 @@ def read(path):
 
 
 def protocol(tree):
-    copy(tree, "src/libavformat/ffstreamer.c", "libavformat/ffstreamer.c")
-    insert(tree, "libavformat/protocols.c", "extern const URLProtocol ff_ffrtmphttp_protocol;\n",
-           "extern const URLProtocol ff_ffstreamer_protocol;\n")
-    insert(tree, "libavformat/Makefile", "OBJS-$(CONFIG_FFRTMPHTTP_PROTOCOL)       += rtmphttp.o\n",
-           "OBJS-$(CONFIG_FFSTREAMER_PROTOCOL)       += ffstreamer.o\n")
-    insert(tree, "configure", 'ffrtmphttp_protocol_select="http_protocol"\n',
-           'ffstreamer_protocol_deps="poll_h"\n')
+    copy(tree, "src/libavformat/fdproxy.c", "libavformat/fdproxy.c")
+    insert(tree, "libavformat/protocols.c", "extern const URLProtocol ff_fd_protocol;\n",
+           "extern const URLProtocol ff_fdproxy_protocol;\n")
+    insert(tree, "libavformat/Makefile", "OBJS-$(CONFIG_FD_PROTOCOL)               += file.o\n",
+           "OBJS-$(CONFIG_FDPROXY_PROTOCOL)          += fdproxy.o\n")
+    insert(tree, "configure", 'ffrtmpcrypt_protocol_conflict="librtmp_protocol"\n',
+           'fdproxy_protocol_deps="poll_h"\n', before=True)
     insert(tree, "doc/protocols.texi", "@section file\n", read("upstream/protocols.texi"), before=True)
-    insert(tree, "Changelog", "version <next>:\n", "- ffstreamer protocol\n")
+    insert(tree, "Changelog", "version <next>:\n", "- fdproxy protocol\n")
     version = os.path.join(tree, "libavformat/version.h")
     with open(version, encoding="utf-8") as f:
         text = f.read()
@@ -84,24 +84,24 @@ def protocol(tree):
 
 
 def fate(tree):
-    copy(tree, "src/libavformat/tests/ffstreamer.c", "libavformat/tests/ffstreamer.c")
-    copy(tree, "src/tests/ref/fate/ffstreamer", "tests/ref/fate/ffstreamer")
+    copy(tree, "src/libavformat/tests/fdproxy.c", "libavformat/tests/fdproxy.c")
+    copy(tree, "src/tests/ref/fate/fdproxy", "tests/ref/fate/fdproxy")
     insert(tree, "libavformat/Makefile", "TESTPROGS-$(CONFIG_FFRTMPCRYPT_PROTOCOL) += rtmpdh\n",
-           "TESTPROGS-$(CONFIG_FFSTREAMER_PROTOCOL)  += ffstreamer\n")
+           "TESTPROGS-$(CONFIG_FDPROXY_PROTOCOL)     += fdproxy\n", before=True)
     insert(tree, "tests/fate/libavformat.mak", "FATE_LIBAVFORMAT-$(CONFIG_FFRTMPCRYPT_PROTOCOL) += fate-rtmpdh\n",
-           "FATE_LIBAVFORMAT-$(CONFIG_FFSTREAMER_PROTOCOL) += fate-ffstreamer\n"
-           "fate-ffstreamer: libavformat/tests/ffstreamer$(EXESUF)\n"
-           "fate-ffstreamer: CMD = run libavformat/tests/ffstreamer$(EXESUF)\n\n", before=True)
+           "FATE_LIBAVFORMAT-$(CONFIG_FDPROXY_PROTOCOL) += fate-fdproxy\n"
+           "fate-fdproxy: libavformat/tests/fdproxy$(EXESUF)\n"
+           "fate-fdproxy: CMD = run libavformat/tests/fdproxy$(EXESUF)\n\n", before=True)
 
 
 def seek(tree):
     replace(tree, "libavformat/seek.c",
             '    if (proto && !(strcmp(proto, "file") && strcmp(proto, "pipe") && strcmp(proto, "cache")))\n',
-            "    /* ffstreamer is local too: its parent serves any offset, so a seek\n"
+            "    /* fdproxy is local too: its parent serves any offset, so a seek\n"
             "     * costs nothing, and reading forward in place of one would read\n"
             "     * megabytes it never needed. */\n"
             '    if (proto && !(strcmp(proto, "file") && strcmp(proto, "pipe") &&\n'
-            '                   strcmp(proto, "cache") && strcmp(proto, "ffstreamer")))\n')
+            '                   strcmp(proto, "cache") && strcmp(proto, "fdproxy")))\n')
 
 
 def demux(tree):
@@ -171,9 +171,9 @@ def probe(tree):
 
 # Each commit: what it changes, and its message in FFmpeg's form.
 PROTOCOL = [
-    (protocol, """avformat/ffstreamer: add the ffstreamer protocol
+    (protocol, """avformat/fdproxy: add the fdproxy protocol
 
-ffstreamer reads an input whose every byte a parent process serves, by
+fdproxy reads an input whose every byte a parent process serves, by
 offset, over two pipes the parent hands down. FFmpeg confined by a
 sandbox (Landlock, seccomp, a container) can then read its input with
 no path to the file, no socket and no other way to reach the storage.
@@ -185,7 +185,7 @@ rather than FFmpeg waiting in the kernel where it cannot be killed.
 The protocol has six messages of fixed form, each bounded and checked
 before use; FFmpeg's side trusts the parent, and the parent trusts
 nothing FFmpeg sends. Its specification:
-https://github.com/kstenerud/ffmpeg-ffstreamer
+https://github.com/kstenerud/ffmpeg-fdproxy
 
 Like fd:, it works on duplicates of the descriptors it is given and
 never closes or changes the caller's. It starts no thread and touches no
@@ -194,13 +194,13 @@ writes, which the program ignores. Its default whitelist is itself, so a
 demuxer's nested open cannot name the channel's descriptors through
 pipe: or fd:. It needs only poll().
 """),
-    (fate, """fate/libavformat: add a test of the ffstreamer protocol
+    (fate, """fate/libavformat: add a test of the fdproxy protocol
 
 A thread serves as the parent over two pipes: a file read through and
 by seeks, a parent that leaves mid-session, terms the protocol refuses,
 and a second session on a pipe that is open already.
 """),
-    (seek, """avformat/seek: treat ffstreamer as a local protocol
+    (seek, """avformat/seek: treat fdproxy as a local protocol
 
 Its parent serves any offset, so a seek costs no more than reading on,
 and reading forward in place of a seek read megabytes the demuxer never
@@ -268,10 +268,14 @@ def check_against_patches(tree, base, paths):
     ours = added_lines(subprocess.run(["git", "-C", tree, "diff", base, "HEAD", "--", *paths],
                                       capture_output=True, text=True, check=True).stdout, paths)
     jellyfin = {}
-    for name in ("9000-ffstreamer-protocol.patch", "9001-fftools-input-errors.patch"):
+    for name in ("9000-fdproxy-protocol.patch", "9001-fftools-input-errors.patch"):
         jellyfin.update(added_lines(read(os.path.join("patches", name)), paths))
     for path in paths:
-        if ours.get(path) != jellyfin.get(path):
+        # The jellyfin patch also counts the protocol's name before 2026-10-24 as local, for this
+        # repository's users alone; FFmpeg's tree has only fdproxy.
+        def code(lines):
+            return " ".join(" ".join(lines or []).split()).replace(' && strcmp(proto, "ffstreamer")', "")
+        if code(ours.get(path)) != code(jellyfin.get(path)):
             raise SystemExit(f"{path}: the series adds other lines than patches/ do; change both")
 
 

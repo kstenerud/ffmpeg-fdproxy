@@ -1,10 +1,10 @@
---- a/libavformat/ffstreamer.c
-+++ b/libavformat/ffstreamer.c
-@@ -0,0 +1,813 @@
+--- a/libavformat/fdproxy.c
++++ b/libavformat/fdproxy.c
+@@ -0,0 +1,828 @@
 +/*
-+ * ffstreamer: reads an input whose every byte a parent process serves over
-+ * two inherited pipes, by offset. See ffstreamer-specification.md in the
-+ * ffmpeg-ffstreamer repository, version 1.
++ * fdproxy: reads an input whose every byte a parent process serves over
++ * two inherited pipes, by offset. See fdproxy-specification.md in the
++ * ffmpeg-fdproxy repository, version 1.
 + *
 + * This file is part of FFmpeg.
 + *
@@ -43,59 +43,59 @@
 +#include "avformat.h"
 +#include "url.h"
 +
-+#define FFS_VERSION_LOWEST   1
-+#define FFS_VERSION_HIGHEST  1
++#define FDP_VERSION_LOWEST   1
++#define FDP_VERSION_HIGHEST  1
 +
-+#define FFS_HEADER_BYTES     6
-+#define FFS_MAX_SENT_FRAME   4096
-+#define FFS_MAX_OUTSTANDING  16
-+#define FFS_WAIT_SLICE_MS    100
-+#define FFS_MESSAGE_MAX      1024
++#define FDP_HEADER_BYTES     6
++#define FDP_MAX_SENT_FRAME   4096
++#define FDP_MAX_OUTSTANDING  16
++#define FDP_WAIT_SLICE_MS    100
++#define FDP_MESSAGE_MAX      1024
 +
 +/* What this side offers in CAPABILITY. */
-+#define FFS_PREFERRED_BLOCK  (1 << 20)
-+#define FFS_LARGEST_BODY     (4 << 20)
-+#define FFS_OUTSTANDING_CAP  2
++#define FDP_PREFERRED_BLOCK  (1 << 20)
++#define FDP_LARGEST_BODY     (4 << 20)
++#define FDP_OUTSTANDING_CAP  2
 +
 +/* The largest file size a REQUEST may give (the specification's Checks
 + * Without Overflow): headroom, so the size plus a block, a READ or a seek
 + * from the end stays below INT64_MAX. */
-+#define FFS_LARGEST_FILE     (INT64_C(1) << 62)
++#define FDP_LARGEST_FILE     (INT64_C(1) << 62)
 +
-+enum FFStreamerType {
-+    FFS_HELLO      = 1,
-+    FFS_CAPABILITY = 2,
-+    FFS_REQUEST    = 3,
-+    FFS_READ       = 4,
-+    FFS_DATA       = 5,
-+    FFS_DONE       = 6,
++enum FDProxyType {
++    FDP_HELLO      = 1,
++    FDP_CAPABILITY = 2,
++    FDP_REQUEST    = 3,
++    FDP_READ       = 4,
++    FDP_DATA       = 5,
++    FDP_DONE       = 6,
 +};
 +
-+enum FFStreamerKind {
-+    FFS_KIND_TERMS       = 1,
-+    FFS_KIND_CHANNEL     = 2,
-+    FFS_KIND_PROTOCOL    = 3,
-+    FFS_KIND_INTERRUPTED = 4,
++enum FDProxyKind {
++    FDP_KIND_TERMS       = 1,
++    FDP_KIND_CHANNEL     = 2,
++    FDP_KIND_PROTOCOL    = 3,
++    FDP_KIND_INTERRUPTED = 4,
 +};
 +
 +/** One block of the file in the cache. */
-+typedef struct FFStreamerBlock {
++typedef struct FDProxyBlock {
 +    int64_t index;      ///< the block's number in the file, or -1 when free
 +    int32_t length;     ///< its length: the block size, or less for the last
 +    int64_t last_used;  ///< when it was last read, by the session's use_clock
 +    int     pending;    ///< its READ is outstanding
 +    uint8_t *data;      ///< its bytes, the block size allocated
-+} FFStreamerBlock;
++} FDProxyBlock;
 +
 +/** A READ sent and not yet answered. */
-+typedef struct FFStreamerOutstanding {
++typedef struct FDProxyOutstanding {
 +    int8_t  sequence;   ///< the READ's number, which its DATA carries
 +    int64_t offset;     ///< where in the file it starts
 +    int32_t length;     ///< how many bytes it asked for
 +    int     slot;       ///< the cache block its DATA goes into
-+} FFStreamerOutstanding;
++} FDProxyOutstanding;
 +
-+typedef struct FFStreamerContext {
++typedef struct FDProxyContext {
 +    const AVClass *class;
 +    int read_fd_option;  ///< the caller's descriptor the parent's messages arrive on
 +    int write_fd_option; ///< the caller's descriptor this side's messages go out on
@@ -113,11 +113,11 @@
 +
 +    int8_t  next_sequence; ///< the number the next frame sent takes
 +
-+    FFStreamerBlock *blocks; ///< the cache, cache_blocks of them
++    FDProxyBlock *blocks; ///< the cache, cache_blocks of them
 +    int64_t use_clock;  ///< counts reads, to find the least recently used
 +
 +    /** The READs sent and not yet answered, oldest first, as a ring. */
-+    FFStreamerOutstanding outstanding[FFS_MAX_OUTSTANDING];
++    FDProxyOutstanding outstanding[FDP_MAX_OUTSTANDING];
 +    int outstanding_first; ///< the oldest's place in the ring
 +    int outstanding_count; ///< how many there are
 +
@@ -131,13 +131,13 @@
 +    int     claimed;    ///< the channel's pipes are claimed for this session
 +    dev_t   claimed_device[2]; ///< the claimed pipes' devices, read then write
 +    ino_t   claimed_inode[2];  ///< the claimed pipes' inodes, read then write
-+    struct FFStreamerContext *next_claim; ///< the next session claimed
-+} FFStreamerContext;
++    struct FDProxyContext *next_claim; ///< the next session claimed
++} FDProxyContext;
 +
 +/* The sessions open in this process, by their pipes: a pipe serves one
 + * session at a time, through whichever descriptor reaches it. */
 +static AVMutex claims_lock = AV_MUTEX_INITIALIZER;
-+static FFStreamerContext *claims;
++static FDProxyContext *claims;
 +
 +/** Checks that fd is a pipe open for access_mode, and gives its identity. */
 +static int check_descriptor(URLContext *h, int fd, int access_mode,
@@ -165,7 +165,7 @@
 + */
 +static int claim_channel(URLContext *h)
 +{
-+    FFStreamerContext *c = h->priv_data;
++    FDProxyContext *c = h->priv_data;
 +    struct stat facts[2];
 +    int ret;
 +
@@ -173,7 +173,7 @@
 +        (ret = check_descriptor(h, c->write_fd_option, O_WRONLY, &facts[1])) < 0)
 +        return ret;
 +    ff_mutex_lock(&claims_lock);
-+    for (FFStreamerContext *other = claims; other; other = other->next_claim)
++    for (FDProxyContext *other = claims; other; other = other->next_claim)
 +        for (int mine = 0; mine < 2; mine++)
 +            for (int theirs = 0; theirs < 2; theirs++)
 +                if (other->claimed_device[theirs] == facts[mine].st_dev &&
@@ -197,12 +197,12 @@
 +}
 +
 +/** Lets the session's pipe go, if it was claimed. */
-+static void release_channel(FFStreamerContext *c)
++static void release_channel(FDProxyContext *c)
 +{
 +    if (!c->claimed)
 +        return;
 +    ff_mutex_lock(&claims_lock);
-+    for (FFStreamerContext **at = &claims; *at; at = &(*at)->next_claim) {
++    for (FDProxyContext **at = &claims; *at; at = &(*at)->next_claim) {
 +        if (*at == c) {
 +            *at = c->next_claim;
 +            break;
@@ -227,11 +227,11 @@
 + */
 +static int wait_for_room(URLContext *h)
 +{
-+    FFStreamerContext *c = h->priv_data;
++    FDProxyContext *c = h->priv_data;
 +
 +    for (;;) {
 +        struct pollfd room = { .fd = c->write_fd, .events = POLLOUT };
-+        int ready = poll(&room, 1, FFS_WAIT_SLICE_MS);
++        int ready = poll(&room, 1, FDP_WAIT_SLICE_MS);
 +
 +        if (ready > 0)
 +            return 0; /* room, or the pipe's end: write() says which */
@@ -250,29 +250,29 @@
 +static int write_frame(URLContext *h, uint8_t type, const uint8_t *body,
 +                       int32_t body_length, int8_t *sequence_out)
 +{
-+    FFStreamerContext *c = h->priv_data;
-+    uint8_t frame[FFS_MAX_SENT_FRAME];
++    FDProxyContext *c = h->priv_data;
++    uint8_t frame[FDP_MAX_SENT_FRAME];
 +    ssize_t written;
 +    int ret;
 +
-+    if (body_length < 0 || body_length > FFS_MAX_SENT_FRAME - FFS_HEADER_BYTES)
++    if (body_length < 0 || body_length > FDP_MAX_SENT_FRAME - FDP_HEADER_BYTES)
 +        return AVERROR(EINVAL);
 +
 +    frame[0] = type;
 +    frame[1] = (uint8_t)c->next_sequence;
 +    AV_WL32(frame + 2, (uint32_t)body_length);
 +    if (body_length)
-+        memcpy(frame + FFS_HEADER_BYTES, body, body_length);
++        memcpy(frame + FDP_HEADER_BYTES, body, body_length);
 +
 +    do {
 +        if ((ret = wait_for_room(h)) < 0)
 +            return ret;
-+        written = write(c->write_fd, frame, FFS_HEADER_BYTES + body_length);
++        written = write(c->write_fd, frame, FDP_HEADER_BYTES + body_length);
 +    } while (written < 0 && (errno == EINTR || errno == EAGAIN));
 +
 +    if (written < 0)
 +        return AVERROR(errno);
-+    if (written != FFS_HEADER_BYTES + body_length)
++    if (written != FDP_HEADER_BYTES + body_length)
 +        return AVERROR(EIO); /* a pipe takes a frame this small whole */
 +    if (sequence_out)
 +        *sequence_out = c->next_sequence;
@@ -289,12 +289,12 @@
 + */
 +static int read_exact(URLContext *h, uint8_t *buffer, int64_t length)
 +{
-+    FFStreamerContext *c = h->priv_data;
++    FDProxyContext *c = h->priv_data;
 +    int64_t got = 0;
 +
 +    while (got < length) {
 +        struct pollfd waiting = { .fd = c->read_fd, .events = POLLIN };
-+        int ready = poll(&waiting, 1, FFS_WAIT_SLICE_MS);
++        int ready = poll(&waiting, 1, FDP_WAIT_SLICE_MS);
 +        ssize_t n;
 +
 +        if (ready < 0 && errno != EINTR)
@@ -321,11 +321,11 @@
 +                       int8_t expected_sequence, int32_t expected_length,
 +                       int32_t *length_out)
 +{
-+    uint8_t header[FFS_HEADER_BYTES];
++    uint8_t header[FDP_HEADER_BYTES];
 +    int32_t length;
 +    int ret;
 +
-+    if ((ret = read_exact(h, header, FFS_HEADER_BYTES)) < 0)
++    if ((ret = read_exact(h, header, FDP_HEADER_BYTES)) < 0)
 +        return ret;
 +    length = (int32_t)AV_RL32(header + 2);
 +    if (header[0] != expected_type || (int8_t)header[1] != expected_sequence ||
@@ -348,10 +348,10 @@
 +static int kind_of(int error)
 +{
 +    if (error == AVERROR_EXIT)
-+        return FFS_KIND_INTERRUPTED;
++        return FDP_KIND_INTERRUPTED;
 +    if (error == AVERROR_INVALIDDATA)
-+        return FFS_KIND_PROTOCOL;
-+    return FFS_KIND_CHANNEL;
++        return FDP_KIND_PROTOCOL;
++    return FDP_KIND_CHANNEL;
 +}
 +
 +/**
@@ -359,7 +359,7 @@
 + * an I/O error, never end-of-file: a parent that died must not look like the
 + * end of the film. Nor is it EAGAIN, which the caller would retry for ever.
 + */
-+static int set_fault(FFStreamerContext *c, int error)
++static int set_fault(FDProxyContext *c, int error)
 +{
 +    if (error == AVERROR_EOF || error == AVERROR(EAGAIN))
 +        error = AVERROR(EIO);
@@ -376,8 +376,8 @@
 + */
 +static void send_done(URLContext *h, int kind, int error)
 +{
-+    FFStreamerContext *c = h->priv_data;
-+    uint8_t body[16 + FFS_MESSAGE_MAX];
++    FDProxyContext *c = h->priv_data;
++    uint8_t body[16 + FDP_MESSAGE_MAX];
 +    int32_t length = 9;
 +
 +    if (c->done_sent)
@@ -388,11 +388,11 @@
 +    if (!kind) {
 +        body[8] = 0;
 +    } else {
-+        char message[FFS_MESSAGE_MAX + 1] = "";
++        char message[FDP_MESSAGE_MAX + 1] = "";
 +        int32_t code = (error < 0 && error != INT_MIN) ? -error : 0;
 +        size_t message_length;
 +        av_strerror(error, message, sizeof(message));
-+        message_length = av_strnlen(message, FFS_MESSAGE_MAX);
++        message_length = av_strnlen(message, FDP_MESSAGE_MAX);
 +        body[8] = 1;
 +        body[9] = (uint8_t)kind;
 +        AV_WL32(body + 10, (uint32_t)code);
@@ -400,7 +400,7 @@
 +        memcpy(body + 16, message, message_length);
 +        length = 16 + (int32_t)message_length;
 +    }
-+    if (write_frame(h, FFS_DONE, body, length, NULL) < 0)
++    if (write_frame(h, FDP_DONE, body, length, NULL) < 0)
 +        av_log(h, AV_LOG_WARNING, "DONE could not be sent; the parent has gone\n");
 +}
 +
@@ -439,23 +439,23 @@
 +    int16_t lowest, highest;
 +    int ret;
 +
-+    AV_WL16(body, FFS_VERSION_LOWEST);
-+    AV_WL16(body + 2, FFS_VERSION_HIGHEST);
-+    if ((ret = write_frame(h, FFS_HELLO, body, 4, NULL)) < 0 ||
-+        (ret = read_header(h, FFS_HELLO, 0, 4, NULL)) < 0 ||
++    AV_WL16(body, FDP_VERSION_LOWEST);
++    AV_WL16(body + 2, FDP_VERSION_HIGHEST);
++    if ((ret = write_frame(h, FDP_HELLO, body, 4, NULL)) < 0 ||
++        (ret = read_header(h, FDP_HELLO, 0, 4, NULL)) < 0 ||
 +        (ret = read_exact(h, body, 4)) < 0)
 +        return ret;
 +    lowest = (int16_t)AV_RL16(body);
 +    highest = (int16_t)AV_RL16(body + 2);
 +    if (lowest < 1 || highest < lowest ||
-+        FFMIN(highest, FFS_VERSION_HIGHEST) <
-+        FFMAX(lowest, FFS_VERSION_LOWEST)) {
++        FFMIN(highest, FDP_VERSION_HIGHEST) <
++        FFMAX(lowest, FDP_VERSION_LOWEST)) {
 +        av_log(h, AV_LOG_ERROR,
 +               "The parent speaks versions %d to %d, this side %d to %d\n",
-+               lowest, highest, FFS_VERSION_LOWEST, FFS_VERSION_HIGHEST);
++               lowest, highest, FDP_VERSION_LOWEST, FDP_VERSION_HIGHEST);
 +        return AVERROR_INVALIDDATA;
 +    }
-+    return FFMIN(highest, FFS_VERSION_HIGHEST);
++    return FFMIN(highest, FDP_VERSION_HIGHEST);
 +}
 +
 +/**
@@ -465,12 +465,12 @@
 +static int receive_request(URLContext *h, int version,
 +                           int8_t capability_sequence)
 +{
-+    FFStreamerContext *c = h->priv_data;
++    FDProxyContext *c = h->priv_data;
 +    uint8_t body[27];
 +    int16_t request_version;
 +    int ret;
 +
-+    if ((ret = read_header(h, FFS_REQUEST, capability_sequence, 27, NULL)) < 0 ||
++    if ((ret = read_header(h, FDP_REQUEST, capability_sequence, 27, NULL)) < 0 ||
 +        (ret = read_exact(h, body, 27)) < 0)
 +        return ret;
 +
@@ -487,11 +487,11 @@
 +        return AVERROR_INVALIDDATA;
 +    }
 +    if (request_version != version || c->run < 1 ||
-+        c->size > FFS_LARGEST_FILE ||
-+        c->block < 1 || c->block > FFS_LARGEST_BODY ||
-+        c->longest < c->block || c->longest > FFS_LARGEST_BODY ||
++        c->size > FDP_LARGEST_FILE ||
++        c->block < 1 || c->block > FDP_LARGEST_BODY ||
++        c->longest < c->block || c->longest > FDP_LARGEST_BODY ||
 +        c->outstanding_allowed < 1 ||
-+        c->outstanding_allowed > FFS_OUTSTANDING_CAP) {
++        c->outstanding_allowed > FDP_OUTSTANDING_CAP) {
 +        av_log(h, AV_LOG_ERROR,
 +               "REQUEST's terms are outside what this side offered\n");
 +        return 1;
@@ -500,7 +500,7 @@
 +}
 +
 +/** Closes the session's duplicates, never the caller's, and ends its claim. */
-+static void close_descriptors(FFStreamerContext *c)
++static void close_descriptors(FDProxyContext *c)
 +{
 +    release_channel(c);
 +    if (c->read_fd >= 0)
@@ -510,7 +510,7 @@
 +    c->read_fd = c->write_fd = -1;
 +}
 +
-+static void free_cache(FFStreamerContext *c)
++static void free_cache(FDProxyContext *c)
 +{
 +    if (c->blocks) {
 +        for (int i = 0; i < c->cache_blocks; i++)
@@ -519,20 +519,22 @@
 +    }
 +}
 +
-+static int ffstreamer_open(URLContext *h, const char *url, int flags)
++static int fdproxy_open(URLContext *h, const char *url, int flags)
 +{
-+    FFStreamerContext *c = h->priv_data;
++    FDProxyContext *c = h->priv_data;
 +    uint8_t body[9];
 +    int8_t capability_sequence;
 +    int64_t blocks_in_file;
++    const char *rest;
 +    int version, ret;
 +
 +    /* The session works on duplicates of the caller's descriptors, as fd:
 +     * does, and never closes or changes the caller's: whatever the outcome,
 +     * they are the caller's to close. */
 +    c->read_fd = c->write_fd = -1;
-+    if (strcmp(url, "ffstreamer:")) {
-+        av_log(h, AV_LOG_ERROR, "The URL must be exactly \"ffstreamer:\"\n");
++    if (!av_strstart(url, h->prot->name, &rest) || strcmp(rest, ":")) {
++        av_log(h, AV_LOG_ERROR, "The URL must be exactly \"%s:\"\n",
++               h->prot->name);
 +        return AVERROR(EINVAL);
 +    }
 +    if (flags & AVIO_FLAG_WRITE)
@@ -557,10 +559,10 @@
 +        goto fail;
 +    }
 +
-+    AV_WL32(body, FFS_PREFERRED_BLOCK);
-+    AV_WL32(body + 4, FFS_LARGEST_BODY);
-+    body[8] = FFS_OUTSTANDING_CAP;
-+    ret = write_frame(h, FFS_CAPABILITY, body, 9, &capability_sequence);
++    AV_WL32(body, FDP_PREFERRED_BLOCK);
++    AV_WL32(body + 4, FDP_LARGEST_BODY);
++    body[8] = FDP_OUTSTANDING_CAP;
++    ret = write_frame(h, FDP_CAPABILITY, body, 9, &capability_sequence);
 +    if (ret < 0)
 +        goto fail;
 +
@@ -568,7 +570,7 @@
 +    if (ret < 0)
 +        goto fail;
 +    if (ret == 1) {
-+        send_done(h, FFS_KIND_TERMS, AVERROR(EINVAL));
++        send_done(h, FDP_KIND_TERMS, AVERROR(EINVAL));
 +        ret = AVERROR(EINVAL);
 +        goto fail;
 +    }
@@ -594,7 +596,7 @@
 +    return 0;
 +
 +out_of_memory:
-+    send_done(h, FFS_KIND_TERMS, AVERROR(ENOMEM));
++    send_done(h, FDP_KIND_TERMS, AVERROR(ENOMEM));
 +    ret = AVERROR(ENOMEM);
 +fail:
 +    /* Neither end-of-file nor EAGAIN, which the caller would retry. */
@@ -609,7 +611,7 @@
 +/* --- The block cache ----------------------------------------------------- */
 +
 +/** The slot holding block index, or -1. */
-+static int find_block(FFStreamerContext *c, int64_t index)
++static int find_block(FDProxyContext *c, int64_t index)
 +{
 +    for (int i = 0; i < c->cache_blocks; i++)
 +        if (c->blocks[i].index == index)
@@ -618,7 +620,7 @@
 +}
 +
 +/** The least recently used block that no outstanding READ will fill. */
-+static int free_slot(FFStreamerContext *c)
++static int free_slot(FDProxyContext *c)
 +{
 +    int chosen = -1;
 +    for (int i = 0; i < c->cache_blocks; i++) {
@@ -632,7 +634,7 @@
 +    return chosen;
 +}
 +
-+static int32_t block_length(FFStreamerContext *c, int64_t index)
++static int32_t block_length(FDProxyContext *c, int64_t index)
 +{
 +    int64_t start = index * c->block;
 +    return (int32_t)FFMIN((int64_t)c->block, c->size - start);
@@ -641,8 +643,8 @@
 +/** Asks the parent for block index, into a free slot. */
 +static int send_read(URLContext *h, int64_t index)
 +{
-+    FFStreamerContext *c = h->priv_data;
-+    FFStreamerOutstanding *entry;
++    FDProxyContext *c = h->priv_data;
++    FDProxyOutstanding *entry;
 +    uint8_t body[12];
 +    int slot = free_slot(c), ret;
 +    int32_t length = block_length(c, index);
@@ -652,14 +654,14 @@
 +        return AVERROR_BUG; /* the cache is larger than what may be outstanding */
 +    AV_WL64(body, (uint64_t)(index * c->block));
 +    AV_WL32(body + 8, (uint32_t)length);
-+    if ((ret = write_frame(h, FFS_READ, body, 12, &sequence)) < 0)
++    if ((ret = write_frame(h, FDP_READ, body, 12, &sequence)) < 0)
 +        return set_fault(c, ret);
 +
 +    c->blocks[slot].index = index;
 +    c->blocks[slot].length = length;
 +    c->blocks[slot].pending = 1;
 +    entry = &c->outstanding[(c->outstanding_first + c->outstanding_count) %
-+                            FFS_MAX_OUTSTANDING];
++                            FDP_MAX_OUTSTANDING];
 +    entry->sequence = sequence;
 +    entry->offset = index * c->block;
 +    entry->length = length;
@@ -671,16 +673,16 @@
 +/** Takes the answer to the oldest outstanding READ into its block. */
 +static int receive_data(URLContext *h)
 +{
-+    FFStreamerContext *c = h->priv_data;
-+    FFStreamerOutstanding *oldest = &c->outstanding[c->outstanding_first];
++    FDProxyContext *c = h->priv_data;
++    FDProxyOutstanding *oldest = &c->outstanding[c->outstanding_first];
 +    int ret;
 +
-+    ret = read_header(h, FFS_DATA, oldest->sequence, oldest->length, NULL);
++    ret = read_header(h, FDP_DATA, oldest->sequence, oldest->length, NULL);
 +    if (ret < 0)
 +        return set_fault(c, ret);
 +    /* The slot is freed no earlier than reading the DATA header (the
 +     * specification's READ). */
-+    c->outstanding_first = (c->outstanding_first + 1) % FFS_MAX_OUTSTANDING;
++    c->outstanding_first = (c->outstanding_first + 1) % FDP_MAX_OUTSTANDING;
 +    c->outstanding_count--;
 +    if ((ret = read_exact(h, c->blocks[oldest->slot].data, oldest->length)) < 0)
 +        return set_fault(c, ret);
@@ -690,18 +692,18 @@
 +}
 +
 +/** Whether a READ for block index is awaiting its DATA. */
-+static int is_outstanding(FFStreamerContext *c, int64_t index)
++static int is_outstanding(FDProxyContext *c, int64_t index)
 +{
 +    for (int i = 0; i < c->outstanding_count; i++)
 +        if (c->outstanding[(c->outstanding_first + i) %
-+                           FFS_MAX_OUTSTANDING].offset == index * c->block)
++                           FDP_MAX_OUTSTANDING].offset == index * c->block)
 +            return 1;
 +    return 0;
 +}
 +
-+static int ffstreamer_read(URLContext *h, unsigned char *buf, int size)
++static int fdproxy_read(URLContext *h, unsigned char *buf, int size)
 +{
-+    FFStreamerContext *c = h->priv_data;
++    FDProxyContext *c = h->priv_data;
 +    int64_t index, blocks_in_file, within;
 +    int slot, ret;
 +
@@ -750,9 +752,9 @@
 +    return ret;
 +}
 +
-+static int64_t ffstreamer_seek(URLContext *h, int64_t position, int whence)
++static int64_t fdproxy_seek(URLContext *h, int64_t position, int whence)
 +{
-+    FFStreamerContext *c = h->priv_data;
++    FDProxyContext *c = h->priv_data;
 +    int64_t target, base;
 +
 +    switch (whence) {
@@ -772,9 +774,9 @@
 +    return target;
 +}
 +
-+static int ffstreamer_close(URLContext *h)
++static int fdproxy_close(URLContext *h)
 +{
-+    FFStreamerContext *c = h->priv_data;
++    FDProxyContext *c = h->priv_data;
 +
 +    if (c->accepted)
 +        send_done(h, c->fault ? c->fault_kind : 0, c->fault);
@@ -783,79 +785,96 @@
 +    return 0;
 +}
 +
-+#define OFFSET(x) offsetof(FFStreamerContext, x)
++#define OFFSET(x) offsetof(FDProxyContext, x)
 +#define D AV_OPT_FLAG_DECODING_PARAM
-+static const AVOption ffstreamer_options[] = {
++static const AVOption fdproxy_options[] = {
 +    { "read_fd",      "The descriptor the parent's messages arrive on", OFFSET(read_fd_option),  AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, D },
 +    { "write_fd",     "The descriptor this side's messages go out on",  OFFSET(write_fd_option), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, D },
 +    { "cache_blocks", "How many of the parent's blocks to keep",        OFFSET(cache_blocks),    AV_OPT_TYPE_INT, { .i64 = 32 },  2,  1024,    D },
-+    /* ffmpeg-ffstreamer only: the names before 2026-10-24, until its users move. */
++    /* ffmpeg-fdproxy only: the names before 2026-10-24, until its users move. */
 +    { "ffstreamer_read_fd",      "Deprecated, use read_fd",      OFFSET(read_fd_option),  AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, D },
 +    { "ffstreamer_write_fd",     "Deprecated, use write_fd",     OFFSET(write_fd_option), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, D },
 +    { "ffstreamer_cache_blocks", "Deprecated, use cache_blocks", OFFSET(cache_blocks),    AV_OPT_TYPE_INT, { .i64 = 32 },  2,  1024,    D },
-+    /* ffmpeg-ffstreamer only: end. */
++    /* ffmpeg-fdproxy only: end. */
 +    { NULL }
 +};
 +
-+static const AVClass ffstreamer_class = {
-+    .class_name = "ffstreamer",
++static const AVClass fdproxy_class = {
++    .class_name = "fdproxy",
 +    .item_name  = av_default_item_name,
-+    .option     = ffstreamer_options,
++    .option     = fdproxy_options,
 +    .version    = LIBAVUTIL_VERSION_INT,
 +};
 +
++const URLProtocol ff_fdproxy_protocol = {
++    .name                = "fdproxy",
++    .url_open            = fdproxy_open,
++    .url_read            = fdproxy_read,
++    .url_seek            = fdproxy_seek,
++    .url_close           = fdproxy_close,
++    .priv_data_size      = sizeof(FDProxyContext),
++    .priv_data_class     = &fdproxy_class,
++    .default_whitelist   = "fdproxy",
++};
++
++/* ffmpeg-fdproxy only: the protocol under its name before 2026-10-24, until its users move. */
 +const URLProtocol ff_ffstreamer_protocol = {
 +    .name                = "ffstreamer",
-+    .url_open            = ffstreamer_open,
-+    .url_read            = ffstreamer_read,
-+    .url_seek            = ffstreamer_seek,
-+    .url_close           = ffstreamer_close,
-+    .priv_data_size      = sizeof(FFStreamerContext),
-+    .priv_data_class     = &ffstreamer_class,
++    .url_open            = fdproxy_open,
++    .url_read            = fdproxy_read,
++    .url_seek            = fdproxy_seek,
++    .url_close           = fdproxy_close,
++    .priv_data_size      = sizeof(FDProxyContext),
++    .priv_data_class     = &fdproxy_class,
 +    .default_whitelist   = "ffstreamer",
 +};
++/* ffmpeg-fdproxy only: end. */
 --- a/libavformat/protocols.c
 +++ b/libavformat/protocols.c
-@@ -33,6 +33,7 @@
+@@ -33,6 +33,8 @@
  extern const URLProtocol ff_crypto_protocol;
  extern const URLProtocol ff_data_protocol;
  extern const URLProtocol ff_fd_protocol;
++extern const URLProtocol ff_fdproxy_protocol;
 +extern const URLProtocol ff_ffstreamer_protocol;
  extern const URLProtocol ff_ffrtmpcrypt_protocol;
  extern const URLProtocol ff_ffrtmphttp_protocol;
  extern const URLProtocol ff_file_protocol;
 --- a/libavformat/Makefile
 +++ b/libavformat/Makefile
-@@ -688,6 +688,7 @@
+@@ -688,6 +688,8 @@
  OBJS-$(CONFIG_FFRTMPHTTP_PROTOCOL)       += rtmphttp.o
  OBJS-$(CONFIG_FILE_PROTOCOL)             += file.o
  OBJS-$(CONFIG_FD_PROTOCOL)               += file.o
-+OBJS-$(CONFIG_FFSTREAMER_PROTOCOL)       += ffstreamer.o
++OBJS-$(CONFIG_FDPROXY_PROTOCOL)          += fdproxy.o
++OBJS-$(CONFIG_FFSTREAMER_PROTOCOL)       += fdproxy.o
  OBJS-$(CONFIG_FTP_PROTOCOL)              += ftp.o
  OBJS-$(CONFIG_GOPHER_PROTOCOL)           += gopher.o
  OBJS-$(CONFIG_GOPHERS_PROTOCOL)          += gopher.o
 --- a/configure
 +++ b/configure
-@@ -4049,6 +4049,7 @@
+@@ -4049,6 +4049,8 @@
  ffrtmpcrypt_protocol_select="tcp_protocol"
  ffrtmphttp_protocol_conflict="librtmp_protocol"
  ffrtmphttp_protocol_select="http_protocol"
++fdproxy_protocol_deps="poll_h"
 +ffstreamer_protocol_deps="poll_h"
  ftp_protocol_select="tcp_protocol"
  gopher_protocol_select="tcp_protocol"
  gophers_protocol_select="tls_protocol"
 --- a/libavformat/seek.c
 +++ b/libavformat/seek.c
-@@ -189,7 +189,11 @@
+@@ -189,7 +189,12 @@
                 "optimally without knowing the protocol\n");
      }
  
 -    if (proto && !(strcmp(proto, "file") && strcmp(proto, "pipe") && strcmp(proto, "cache")))
-+    /* ffstreamer is local too: its parent serves any offset, so a seek
++    /* fdproxy is local too: its parent serves any offset, so a seek
 +     * costs nothing, and reading forward in place of one would read
 +     * megabytes it never needed. */
 +    if (proto && !(strcmp(proto, "file") && strcmp(proto, "pipe") &&
-+                   strcmp(proto, "cache") && strcmp(proto, "ffstreamer")))
++                   strcmp(proto, "cache") && strcmp(proto, "fdproxy") &&
++                   strcmp(proto, "ffstreamer")))
          return;
  
      for (unsigned ist1 = 0; ist1 < s->nb_streams; ist1++) {

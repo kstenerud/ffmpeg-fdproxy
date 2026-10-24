@@ -1,7 +1,10 @@
-# FFmpeg + FFstreamer
+# FFmpeg + fdproxy
 
-FFstreamer is a new way to feed data into FFmpeg in a security-constrained environment. These
-patches on top of [jellyfin-ffmpeg](https://github.com/jellyfin/jellyfin-ffmpeg) add `ffstreamer`,
+Named ffmpeg-ffstreamer, and its protocol `ffstreamer`, until 2026-10-24; this repository's builds
+still take the old names beside the new.
+
+fdproxy is a new way to feed data into FFmpeg in a security-constrained environment. These
+patches on top of [jellyfin-ffmpeg](https://github.com/jellyfin/jellyfin-ffmpeg) add `fdproxy`,
 a protocol over which a parent process serves every read FFmpeg makes of its input, by byte offset,
 over two pipes it hands down.
 
@@ -16,13 +19,13 @@ given.
 
 ## Documents
 
-* [ffstreamer-specification.md](ffstreamer-specification.md)
-* [ffstreamer.dogma](ffstreamer.dogma)
+* [fdproxy-specification.md](fdproxy-specification.md)
+* [fdproxy.dogma](fdproxy.dogma)
 * [DESIGN.md](DESIGN.md)
 
 ## Code
 
-* [Patch: ffstreamer protocol in libavformat](patches/9000-ffstreamer-protocol.patch)
+* [Patch: fdproxy protocol in libavformat](patches/9000-fdproxy-protocol.patch)
 * [Patch: ffmpeg and ffprobe exit non-zero when an input's reads failed](patches/9001-fftools-input-errors.patch)
 * For FFmpeg's own tree: `make upstream` writes the same changes as a series of six commits on the
   FFmpeg commit `UPSTREAM_COMMIT` names, into `build/upstream/`: the protocol with its manual
@@ -39,7 +42,7 @@ given.
 
 * The unpatched build reproduces jellyfin's release: its build configuration, encoders and
   hardware accelerators are identical to the published binary.
-* The patched build differs only by the `ffstreamer` protocol.
+* The patched build differs only by the `fdproxy` protocol.
 * Build times: amd64 74 minutes cold, 7 warm; arm64 64 minutes cold (its cross toolchain).
 
 ### Test suite
@@ -95,8 +98,8 @@ make media                # the suite's two films, made from FFmpeg's test sourc
 make test                 # the suite, against dist/bin-amd64, with the films in media/
 make fuzz                 # FFmpeg's side fuzzed for 10 minutes under ASan and UBSan
 make test-claims          # a pipe serves one session at a time; a closed one's number serves the next
-make check-patch          # patches/9000 carries src/libavformat/ffstreamer.c as it stands
-make check-spec           # the specification embeds ffstreamer.dogma as it stands
+make check-patch          # patches/9000 carries src/libavformat/fdproxy.c as it stands
+make check-spec           # the specification embeds fdproxy.dogma as it stands
 make patch                # rewrites patches/9000 from src/ after an edit there
 make upstream             # the series for FFmpeg's own tree, into build/upstream/
 make test-upstream        # the series built on FFmpeg master, its FATE test run, its manual built
@@ -111,7 +114,7 @@ needs Docker. The first build makes its toolchain image, an hour or more; later 
 chapters, as Matroska and as MP4 with its index at the end. They take a minute and 240 MB. The suite
 takes any films with those four streams in that order (`MEDIA=<dir>`).
 
-`make fuzz` builds `fuzz/ffstreamer_fuzzer.c`, a libFuzzer harness of FFmpeg's side, with
+`make fuzz` builds `fuzz/fdproxy_fuzzer.c`, a libFuzzer harness of FFmpeg's side, with
 AddressSanitizer and UndefinedBehaviorSanitizer, against a minimal FFmpeg built the same way, and
 runs it on eight workers from the seeds in `fuzz/corpus/` (`fuzz/make_corpus.py` writes them). Each
 input drives a whole session. Its header chooses the parent: one that answers each `READ` (rightly,
@@ -133,13 +136,13 @@ once, or not carrying the fault's kind and code; an open's outcome against its t
 returning `EAGAIN` or end of file; a caller's descriptor closed or its flags changed by any open,
 refused, failed or closed; a session not working on two close-on-exec duplicates, closing a
 descriptor it did not make or one twice, or leaving a duplicate open; the protocol waiting on once
-the interrupt has fired, or spinning; a descriptor leaked. `FFSTREAMER_FUZZ_TRACE=1` prints a line for each input it runs, and `=2` each
+the interrupt has fired, or spinning; a descriptor leaked. `FDPROXY_FUZZ_TRACE=1` prints a line for each input it runs, and `=2` each
 system call too. `make test-claims` builds `test/claims_test.c` the same way and runs it.
 
 `make test-upstream` builds FFmpeg at `UPSTREAM_COMMIT` with the series and nothing else enabled, in
 Docker, fails on any warning in the series' files, builds the protocols manual, and runs
-`fate-ffstreamer`: `src/libavformat/tests/ffstreamer.c`, which serves a file from a thread over two
-pipes and reads it through the public avio API, against `src/tests/ref/fate/ffstreamer`. It reads
+`fate-fdproxy`: `src/libavformat/tests/fdproxy.c`, which serves a file from a thread over two
+pipes and reads it through the public avio API, against `src/tests/ref/fate/fdproxy`. It reads
 through, by seeks and at random through a cache of two blocks; meets a parent that leaves, stalls
 (ended by the interrupt), misnumbers a `DATA` (the fault sticks), stops reading (`EPIPE`, SIGPIPE
 ignored as the program must) or sends a `DATA` a byte at a time (the interrupt is seen between
@@ -157,9 +160,9 @@ first through this protocol.
 
 | Path | What |
 | --- | --- |
-| [`ffstreamer-specification.md`](ffstreamer-specification.md) | The protocol between FFmpeg and the process that serves its reads. |
+| [`fdproxy-specification.md`](fdproxy-specification.md) | The protocol between FFmpeg and the process that serves its reads. |
 | [`DESIGN.md`](DESIGN.md) | Why the protocol is as it is: rationale, FFmpeg's internals, testing, measurements, open questions. |
-| [`ffstreamer.dogma`](ffstreamer.dogma) | The protocol's wire format, in [Dogma](https://github.com/kstenerud/dogma). |
+| [`fdproxy.dogma`](fdproxy.dogma) | The protocol's wire format, in [Dogma](https://github.com/kstenerud/dogma). |
 | [`patches/`](patches/) | The patches, appended to jellyfin-ffmpeg's own `debian/patches/series`. |
 | [`src/`](src/) | The protocol's source, from which `patches/9000` is made, and its FATE test and reference. |
 | [`upstream/`](upstream/), [`UPSTREAM_COMMIT`](UPSTREAM_COMMIT) | The manual entry for FFmpeg's own tree, and the FFmpeg commit the series is made on. |
@@ -181,14 +184,14 @@ first through this protocol.
 * **fuzz-weekly**: five hours of fuzzing every Sunday.
 * **release**, on a tag `v<jellyfin version>-<n>` (`v8.1.2-5-1` is the first release on
   jellyfin-ffmpeg v8.1.2-5): the same build and suite, then a release holding
-  `ffmpeg-ffstreamer_<version>_linux64-gpl.tar.xz`, `…_linuxarm64-gpl.tar.xz` and `SHA256SUMS`. The
+  `ffmpeg-fdproxy_<version>_linux64-gpl.tar.xz`, `…_linuxarm64-gpl.tar.xz` and `SHA256SUMS`. The
   tarballs are laid out as jellyfin's portable ones, `ffmpeg` and `ffprobe` at the root.
 
 ## Licence
 
 The code is LGPL 2.1 or later ([LICENSE](LICENSE)), as FFmpeg's own source is: the patches, the
 reference parent, the tests and the tools. The specification and its grammar
-([ffstreamer-specification.md](ffstreamer-specification.md), [ffstreamer.dogma](ffstreamer.dogma))
+([fdproxy-specification.md](fdproxy-specification.md), [fdproxy.dogma](fdproxy.dogma))
 are under the [Creative Commons Attribution License](https://creativecommons.org/licenses/by/4.0/),
 so anyone may implement the protocol in any program. The binaries built with these patches are GPL, as
 jellyfin-ffmpeg's builds are, since its configuration enables GPL libraries such as x264. Every

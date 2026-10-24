@@ -51,8 +51,8 @@ jobs:
         run: |
           version=${GITHUB_REF_NAME#v}
           mkdir release
-          cp built/ffmpeg-amd64/*_portable_linux64-gpl.tar.xz "release/ffmpeg-ffstreamer_${version}_linux64-gpl.tar.xz"
-          cp built/ffmpeg-arm64/*_portable_linuxarm64-gpl.tar.xz "release/ffmpeg-ffstreamer_${version}_linuxarm64-gpl.tar.xz"
+          cp built/ffmpeg-amd64/*_portable_linux64-gpl.tar.xz "release/ffmpeg-fdproxy_${version}_linux64-gpl.tar.xz"
+          cp built/ffmpeg-arm64/*_portable_linuxarm64-gpl.tar.xz "release/ffmpeg-fdproxy_${version}_linuxarm64-gpl.tar.xz"
           (cd release && sha256sum -- *.tar.xz > SHA256SUMS && cat SHA256SUMS)
       - name: Publish
         env:
@@ -60,4 +60,4 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" \
-            --notes "jellyfin-ffmpeg ${GITHUB_REF_NAME%-*} with the ffstreamer protocol, for linux/amd64 and linux/arm64. Built and tested by this release's workflow run; SHA256SUMS lists each tarball's SHA-256. GPL, as the FFmpeg build it patches."
+            --notes "jellyfin-ffmpeg ${GITHUB_REF_NAME%-*} with the fdproxy protocol, for linux/amd64 and linux/arm64. Built and tested by this release's workflow run; SHA256SUMS lists each tarball's SHA-256. GPL, as the FFmpeg build it patches."

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Builds FFmpeg with the ffstreamer patches: checkout.sh's jellyfin-ffmpeg, at the tag JELLYFIN_TAG
+# Builds FFmpeg with the fdproxy patches: checkout.sh's jellyfin-ffmpeg, at the tag JELLYFIN_TAG
 # names with these patches after jellyfin's own series, built by jellyfin's portable builder.
 #
 #     build.sh ARCH OUT_DIR

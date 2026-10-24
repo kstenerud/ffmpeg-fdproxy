@@ -42,7 +42,7 @@ cannot fix is how FFmpeg reads its input:
   disk wants to schedule their reads, pace a background job behind a viewer's, and refuse a range
   that is not the file's.
 
-`ffstreamer:` moves every read to the parent. FFmpeg inherits two pipes and asks for byte ranges of
+`fdproxy:` moves every read to the parent. FFmpeg inherits two pipes and asks for byte ranges of
 its one input; the parent reads the file and answers. Storage that stops answering holds a thread
 of the parent, which notices and kills the run, which always dies, since FFmpeg only ever waits in
 `poll` on a pipe. The parent sees, paces and bounds every read. FFmpeg, confined with no path to
@@ -117,7 +117,7 @@ has `cache_dir`.
 end-of-file, so a parent that died is never taken for the end of the film; an interrupt is
 `AVERROR_EXIT`. Each sticks: every later read returns it.
 
-**Counting ffstreamer as local in `seek.c`.** FFmpeg's index seeking reads ahead generously on
+**Counting fdproxy as local in `seek.c`.** FFmpeg's index seeking reads ahead generously on
 network protocols, judged by a list of local protocol names. Every block here comes from a local
 pipe, and taken for a network protocol an 11-track film was read 25 times over, where read directly
 it touched 12 blocks (DESIGN.md, The Block Cache). The patch adds the name to the list; a protocol flag would be the
@@ -125,7 +125,7 @@ cleaner fix, and the series offers to make one if asked.
 
 **An external specification.** The protocol is a contract between FFmpeg and a parent that is not
 part of FFmpeg, so it is specified apart from FFmpeg's code, versioned, with its wire format in a
-formal grammar (`ffstreamer.dogma`). The manual links a tagged version of it.
+formal grammar (`fdproxy.dogma`). The manual links a tagged version of it.
 
 
 
@@ -140,7 +140,7 @@ Two series, sent apart, since they are separate decisions for separate maintaine
    signal interrupts opening an input; ffprobe fails the same way, maps an interrupt to EINTR, and
    ignores SIGPIPE. These change behaviour for every input, HTTP among them: a dropped stream that
    exited 0 now fails. Offered as the default, with an opt-in form (a value of `-abort_on`) ready if
-   the maintainers prefer it, since the ffstreamer parent can pass a flag as easily.
+   the maintainers prefer it, since the fdproxy parent can pass a flag as easily.
 2. **The protocol series** (to libavformat): the protocol with its manual and Changelog; its FATE
    test; counting it as local in `seek.c`.
 
@@ -151,7 +151,7 @@ Two series, sent apart, since they are separate decisions for separate maintaine
 Evidence
 --------
 
-* **FATE:** `fate-ffstreamer` serves a file from a thread and reads it through the public avio API:
+* **FATE:** `fate-fdproxy` serves a file from a thread and reads it through the public avio API:
   reads, seeks, random reads through a two-block cache, a parent that leaves, stalls, misnumbers,
   stops reading or trickles, a full request pipe, refused descriptors, a second session. Each fault
   injected into the protocol fails it (README, Verification).
@@ -173,7 +173,7 @@ Each waits until after Orpheum's beta, and none commits anyone to anything until
 | --- | --- |
 | Send the series at all | Parked. Rejection is acceptable: the patches are carried on jellyfin-ffmpeg either way. |
 | A MAINTAINERS entry | Parked (the owner, 2026-10-24). FFmpeg asks who adds a protocol to maintain it; no one takes that on during the beta. |
-| The protocol's name | Researched (docs/research/ff-prefix-names.md); the choice is parked. In FFmpeg "ff" marks a format FFmpeg invented and owns (`ffv1`, `ffmetadata`, `ffconcat`) or an internal helper no one names (`ffrtmphttp`, renamed to it to set it apart from the protocols users name); an outside-defined protocol users name is neither, so the name will likely be questioned. Candidates no FFmpeg component uses: `fdproxy`, `piperange`. |
+| The protocol's name | Decided (the owner, 2026-10-24): `fdproxy`, renamed from `ffstreamer`, since in FFmpeg "ff" marks a format FFmpeg invented and owns (`ffv1`, `ffmetadata`, `ffconcat`) or an internal helper no one names (`ffrtmphttp`), never an outside-defined protocol users name (docs/research/ff-prefix-names.md). The jellyfin patches keep the old name as an alias until their users move; the series for FFmpeg carries only `fdproxy`. |
 | `Signed-off-by` | Added by the sender, when sending. |
 | Disclosing AI assistance | Parked; FFmpeg's policy discussion was unresolved when last checked (2026-10-23). |
 | The fftools default | Proposed as the default, opt-in ready (see [The Series](#the-series)). |

@@ -6,7 +6,7 @@
 #
 # SSH_TARGET is what ssh takes ("-i key user@host" works, quoted as one argument); ARCH is amd64
 # or arm64. The host needs git, Docker and the network. Each build is kept on the host under
-# ~/ffstreamer-builds/<commit>-<arch>/, so asking again for a commit already built fetches it
+# ~/fdproxy-builds/<commit>-<arch>/, so asking again for a commit already built fetches it
 # without building; -f builds it again. Only what is committed is built: a tree with uncommitted
 # changes to the patches, src/ or the build scripts is refused, since its build would carry the
 # commit's name and not be the commit.
@@ -39,7 +39,7 @@ if [ -n "$(git status --porcelain -- patches src build.sh checkout.sh JELLYFIN_T
     exit 1
 fi
 commit=$(git rev-parse --short=12 HEAD)
-kept="ffstreamer-builds/$commit-$arch"
+kept="fdproxy-builds/$commit-$arch"
 case $arch in amd64) name=linux64 ;; arm64) name=linuxarm64 ;; esac
 
 # shellcheck disable=SC2086 # the target may carry ssh's own options

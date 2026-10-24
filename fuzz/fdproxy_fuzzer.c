@@ -1,5 +1,5 @@
 /*
- * A libFuzzer harness for FFmpeg's side of ffstreamer. Each input drives a whole session: a header
+ * A libFuzzer harness for FFmpeg's side of fdproxy. Each input drives a whole session: a header
  * chooses the parent and the channel (the terms, how the parent delivers and when it stalls, what
  * becomes of the pipe of requests, when the interrupt fires, which system calls fail), and a script
  * of operations follows (reads of any size, seeks with any whence, through the protocol's functions,
@@ -72,14 +72,14 @@ static int hook_dup(int fd);
 
 /* The protocol itself, its system calls routed through the harness and its URLProtocol renamed, so
  * the library's stays apart. */
-#define ff_ffstreamer_protocol fuzz_ffstreamer_protocol
+#define ff_fdproxy_protocol fuzz_fdproxy_protocol
 #define poll  hook_poll
 #define read  hook_read
 #define write hook_write
 #define close hook_close
 #define fcntl hook_fcntl
 #define dup   hook_dup
-#include "libavformat/ffstreamer.c"
+#include "libavformat/fdproxy.c"
 #undef poll
 #undef read
 #undef write
@@ -201,7 +201,7 @@ typedef struct Global {
     int64_t history[HISTORY];
     int history_count;
 
-    int trace;          ///< FFSTREAMER_FUZZ_TRACE is set
+    int trace;          ///< FDPROXY_FUZZ_TRACE is set
     uint8_t *buffer;
 } Global;
 
@@ -209,7 +209,7 @@ static Global G;
 
 static void die(const char *what)
 {
-    fprintf(stderr, "ffstreamer_fuzzer: INVARIANT BROKEN: %s\n", what);
+    fprintf(stderr, "fdproxy_fuzzer: INVARIANT BROKEN: %s\n", what);
     abort();
 }
 
@@ -218,10 +218,10 @@ static void die(const char *what)
 static int kind_of_error(int error)
 {
     if (error == AVERROR_EXIT)
-        return FFS_KIND_INTERRUPTED;
+        return FDP_KIND_INTERRUPTED;
     if (error == AVERROR_INVALIDDATA)
-        return FFS_KIND_PROTOCOL;
-    return FFS_KIND_CHANNEL;
+        return FDP_KIND_PROTOCOL;
+    return FDP_KIND_CHANNEL;
 }
 
 /* --- The parent's queue ---------------------------------------------------------------------- */
@@ -313,7 +313,7 @@ static void queue_request(Parent *p, int sequence)
     uint8_t body[27];
     if (G.request_sequence_wrong)
         sequence = (sequence + 1) % 128;
-    queue_header(p, FFS_REQUEST, sequence, 27);
+    queue_header(p, FDP_REQUEST, sequence, 27);
     AV_WL16(body, (uint16_t)G.version);
     AV_WL64(body + 2, (uint64_t)G.run);
     AV_WL64(body + 10, (uint64_t)G.size);
@@ -327,14 +327,14 @@ static void queue_request(Parent *p, int sequence)
 static void queue_data(Parent *p, int sequence, int64_t offset, int32_t length)
 {
     uint8_t action = G.next_action < G.actions_count ? G.actions[G.next_action++] : 0;
-    int type = FFS_DATA, header_length = length, body_length = length;
+    int type = FDP_DATA, header_length = length, body_length = length;
     uint8_t chunk[4096];
 
     switch (action % 16) {
     case 6:  queue_event(p, EV_CHUNK, FFMAX(1, length / 2048)); break; /* by dribs */
     case 7:  queue_event(p, EV_DELAY, 1 + (action >> 4)); break; /* slow, then right */
     case 8:  sequence = (sequence + 1 + (action >> 4)) % 128; break;
-    case 9:  type = (action >> 4) == FFS_DATA ? FFS_HELLO : action >> 4; break;
+    case 9:  type = (action >> 4) == FDP_DATA ? FDP_HELLO : action >> 4; break;
     case 10: header_length = (action & 0x10) ? length + 1 : length - 1; body_length = header_length; break;
     case 11: body_length = (int32_t)(length * (int64_t)(action >> 4) / 16); break; /* then closes */
     case 12: queue_event(p, EV_CLOSE, 0); return;
@@ -343,7 +343,7 @@ static void queue_data(Parent *p, int sequence, int64_t offset, int32_t length)
     default: break;
     }
     queue_header(p, type, sequence, header_length);
-    if (type == FFS_DATA && header_length == length && p->header_count < 64)
+    if (type == FDP_DATA && header_length == length && p->header_count < 64)
         p->header_ends[(p->header_first + p->header_count++) % 64] = p->queue_length;
     for (int32_t done = 0; done < body_length;) {
         int32_t n = FFMIN(body_length - done, (int32_t)sizeof(chunk));
@@ -448,23 +448,23 @@ static void parse_frame(Parent *p, int type, int sequence, int32_t length, const
     CHECK(!p->dones, "a frame after DONE");
 
     switch (type) {
-    case FFS_HELLO:
+    case FDP_HELLO:
         CHECK(length == 4 && sequence == 0 && !p->hellos, "a bad HELLO");
         CHECK(AV_RL16(body) == 1 && AV_RL16(body + 2) == 1, "HELLO offers other versions");
         p->hellos++;
         break;
-    case FFS_CAPABILITY:
+    case FDP_CAPABILITY:
         CHECK(length == 9 && p->hellos == 1 && !p->capabilities, "a bad CAPABILITY");
         p->capabilities++;
         p->capability_sequence = sequence;
         if (G.responsive)
             queue_request(p, sequence);
         break;
-    case FFS_READ:
+    case FDP_READ:
         CHECK(length == 12 && p->capabilities, "a bad READ");
         parse_read(p, sequence, body);
         break;
-    case FFS_DONE: {
+    case FDP_DONE: {
         int16_t message;
         CHECK(length >= 9 && p->capabilities, "a bad DONE");
         p->dones++;
@@ -479,7 +479,7 @@ static void parse_frame(Parent *p, int type, int sequence, int32_t length, const
         p->done_kind = body[9];
         p->done_code = (int32_t)AV_RL32(body + 10);
         message = (int16_t)AV_RL16(body + 14);
-        CHECK(message >= 0 && message <= FFS_MESSAGE_MAX && length == 16 + message,
+        CHECK(message >= 0 && message <= FDP_MESSAGE_MAX && length == 16 + message,
               "DONE's message length is wrong");
         break;
     }
@@ -491,15 +491,15 @@ static void parse_frame(Parent *p, int type, int sequence, int32_t length, const
 static void parse_back(Parent *p)
 {
     size_t at = 0;
-    while (p->back_length - at >= FFS_HEADER_BYTES) {
+    while (p->back_length - at >= FDP_HEADER_BYTES) {
         int32_t length = (int32_t)AV_RL32(p->back + at + 2);
-        CHECK(length >= 0 && length <= FFS_MAX_SENT_FRAME - FFS_HEADER_BYTES,
+        CHECK(length >= 0 && length <= FDP_MAX_SENT_FRAME - FDP_HEADER_BYTES,
               "a frame longer than 4,096 bytes");
-        if (p->back_length - at < FFS_HEADER_BYTES + (size_t)length)
+        if (p->back_length - at < FDP_HEADER_BYTES + (size_t)length)
             break;
         p->frame_start = p->back_total - (int64_t)p->back_length + (int64_t)at;
         parse_frame(p, p->back[at], (int8_t)p->back[at + 1], length, p->back + at + 6);
-        at += FFS_HEADER_BYTES + length;
+        at += FDP_HEADER_BYTES + length;
     }
     memmove(p->back, p->back + at, p->back_length - at);
     p->back_length -= at;
@@ -826,7 +826,7 @@ static void end_op(void)
 /** The protocol's url_read, checked: what FFmpeg's I/O layer may rely on. */
 static int check_read(URLContext *h, unsigned char *buffer, int size)
 {
-    int ret = ffstreamer_read(h, buffer, size);
+    int ret = fdproxy_read(h, buffer, size);
 
     if (h != G.main_h)
         goto end;
@@ -887,7 +887,7 @@ static int64_t expected_seek(int64_t position, int whence)
 static int64_t check_seek(URLContext *h, int64_t position, int whence)
 {
     int64_t expect = h == G.main_h ? expected_seek(position, whence) : 0;
-    int64_t ret = ffstreamer_seek(h, position, whence);
+    int64_t ret = fdproxy_seek(h, position, whence);
 
     if (h != G.main_h)
         return ret;
@@ -898,14 +898,14 @@ static int64_t check_seek(URLContext *h, int64_t position, int whence)
 }
 
 static const URLProtocol checked_protocol = {
-    .name            = "ffstreamer",
-    .url_open        = ffstreamer_open,
+    .name            = "fdproxy",
+    .url_open        = fdproxy_open,
     .url_read        = check_read,
     .url_seek        = check_seek,
-    .url_close       = ffstreamer_close,
-    .priv_data_size  = sizeof(FFStreamerContext),
-    .priv_data_class = &ffstreamer_class,
-    .default_whitelist = "ffstreamer",
+    .url_close       = fdproxy_close,
+    .priv_data_size  = sizeof(FDProxyContext),
+    .priv_data_class = &fdproxy_class,
+    .default_whitelist = "fdproxy",
 };
 
 /* The URL layer's own options, so av_opt_free() frees the whitelist ffurl_connect() copies from
@@ -926,7 +926,7 @@ static const AVClass url_class = {
 static URLContext *make_context(const char *url, int flags, int read_fd, int write_fd, int cache)
 {
     URLContext *h = av_mallocz(sizeof(*h) + strlen(url) + 1);
-    FFStreamerContext *c;
+    FDProxyContext *c;
 
     if (!h)
         return NULL;
@@ -942,7 +942,7 @@ static URLContext *make_context(const char *url, int flags, int read_fd, int wri
     h->flags = flags;
     h->priv_data = c;
     h->interrupt_callback = (AVIOInterruptCB){ interrupt_callback, NULL };
-    c->class = &ffstreamer_class;
+    c->class = &fdproxy_class;
     av_opt_set_defaults(c);
     c->read_fd_option = read_fd;
     c->write_fd_option = write_fd;
@@ -972,16 +972,16 @@ static int make_pipe(int fds[2])
 static void second_opening(int fd, int preset)
 {
     uint8_t frames[64 + 100], *at = frames;
-    at[0] = FFS_HELLO; at[1] = 0; AV_WL32(at + 2, 4); AV_WL16(at + 6, 1); AV_WL16(at + 8, 1);
+    at[0] = FDP_HELLO; at[1] = 0; AV_WL32(at + 2, 4); AV_WL16(at + 6, 1); AV_WL16(at + 8, 1);
     at += 10;
     if (preset >= 2) {
-        at[0] = FFS_REQUEST; at[1] = 1; AV_WL32(at + 2, 27);
+        at[0] = FDP_REQUEST; at[1] = 1; AV_WL32(at + 2, 27);
         AV_WL16(at + 6, 1); AV_WL64(at + 8, 9); AV_WL64(at + 16, 300);
         AV_WL32(at + 24, preset == 3 ? 0 : 100); AV_WL32(at + 28, 100); at[32] = 1;
         at += 33;
     }
     if (preset == 2) {
-        at[0] = FFS_DATA; at[1] = 2; AV_WL32(at + 2, 100);
+        at[0] = FDP_DATA; at[1] = 2; AV_WL32(at + 2, 100);
         for (int i = 0; i < 100; i++)
             at[6 + i] = film_byte(i);
         at += 106;
@@ -1004,7 +1004,7 @@ static int second_dones(int fd, int *result)
         int32_t frame = (int32_t)AV_RL32(back + at + 2);
         if (frame < 0 || length - at < 6 + frame)
             break;
-        if (back[at] == FFS_DONE) {
+        if (back[at] == FDP_DONE) {
             dones++;
             *result = frame >= 9 ? back[at + 6 + 8] : -1;
         }
@@ -1022,7 +1022,7 @@ static void second_open(int variant, int preset)
 {
     int a[2] = { -1, -1 }, b[2] = { -1, -1 }, extra = -1;
     int read_fd, write_fd, flags = AVIO_FLAG_READ, expect, ret, main_open;
-    const char *url = "ffstreamer:";
+    const char *url = "fdproxy:";
     URLContext *h;
     uint32_t calls_before;
     int dups_before, fl[2], fd_flags[2];
@@ -1046,7 +1046,7 @@ static void second_open(int variant, int preset)
     case 7:  read_fd = a[1]; write_fd = b[0]; expect = AVERROR(EBADF); break;
     case 8:  extra = dup(a[0]); close(extra); read_fd = extra; extra = -1;
              expect = AVERROR(EBADF); break;
-    case 9:  url = "ffstreamer:x"; expect = AVERROR(EINVAL); break;
+    case 9:  url = "fdproxy:x"; expect = AVERROR(EINVAL); break;
     case 10: flags = AVIO_FLAG_READ_WRITE; expect = AVERROR(EINVAL); break;
     default: read_fd = G.p.ffmpeg_read; write_fd = G.p.ffmpeg_write; expect = AVERROR(EBUSY);
              break;
@@ -1318,11 +1318,11 @@ static void read_header_bytes(const uint8_t *h)
     case 0:  G.size = s16; break;
     case 1:  G.size = (int64_t)s16 * 128; break;
     case 2:  G.size = (int64_t)G.block * (s16 & 63) + (s16 >> 6) % 3 - 1; break;
-    default: G.size = FFS_LARGEST_FILE - (s16 & 0x3fff); break;
+    default: G.size = FDP_LARGEST_FILE - (s16 & 0x3fff); break;
     }
     if (G.size < 0)
         G.size = 0;
-    G.longest = (h[4] & 0x80) ? FFMIN(G.block * 2, FFS_LARGEST_BODY) : G.block;
+    G.longest = (h[4] & 0x80) ? FFMIN(G.block * 2, FDP_LARGEST_BODY) : G.block;
     G.outstanding = 1 + (h[4] & 1);
     G.version = 1;
     G.run = 1 + h[15];
@@ -1336,10 +1336,10 @@ static void read_header_bytes(const uint8_t *h)
     case 5:  G.version = 2; break;
     case 6:  G.run = 0; break;
     case 7:  G.run = -1; break;
-    case 8:  G.size = FFS_LARGEST_FILE + 1; break;
+    case 8:  G.size = FDP_LARGEST_FILE + 1; break;
     case 9:  G.size = -1; break;
     case 10: G.block = 0; break;
-    case 11: G.block = FFS_LARGEST_BODY + 1; G.longest = G.block; break;
+    case 11: G.block = FDP_LARGEST_BODY + 1; G.longest = G.block; break;
     case 12: G.longest = G.block - 1; break;
     case 13: G.outstanding = 0; break;
     case 14: G.outstanding = 3; break;
@@ -1349,9 +1349,9 @@ static void read_header_bytes(const uint8_t *h)
     G.request_malformed = G.request_sequence_wrong || G.run < 0 || G.size < 0 || G.block < 0 ||
                           G.longest < 0 || G.outstanding < 0;
     G.request_invalid = !G.request_malformed &&
-        (G.version != 1 || G.run < 1 || G.size > FFS_LARGEST_FILE || G.block < 1 ||
-         G.block > FFS_LARGEST_BODY || G.longest < G.block || G.longest > FFS_LARGEST_BODY ||
-         G.outstanding < 1 || G.outstanding > FFS_OUTSTANDING_CAP);
+        (G.version != 1 || G.run < 1 || G.size > FDP_LARGEST_FILE || G.block < 1 ||
+         G.block > FDP_LARGEST_BODY || G.longest < G.block || G.longest > FDP_LARGEST_BODY ||
+         G.outstanding < 1 || G.outstanding > FDP_OUTSTANDING_CAP);
     if (G.hello_sequence || G.hello_lowest < 1 || G.hello_highest < 1 || G.hello_lowest > 1)
         G.expect_open = AVERROR_INVALIDDATA;
     else if (G.request_malformed)
@@ -1407,7 +1407,7 @@ static void finish_session(int open_ret, int read_fd, int write_fd)
         if (G.expect_open == AVERROR(EINVAL)) {
             CHECK(p->dones == 1 || G.lossy, "terms refused without DONE");
             if (p->dones)
-                CHECK(p->done_result == 1 && p->done_kind == FFS_KIND_TERMS &&
+                CHECK(p->done_result == 1 && p->done_kind == FDP_KIND_TERMS &&
                       p->done_run == (G.run >= 1 ? G.run : 0), "terms refused with the wrong DONE");
         } else {
             CHECK(p->dones == 0, "DONE from an open that failed before its terms");
@@ -1428,7 +1428,7 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
     av_log_set_level(AV_LOG_QUIET);
     signal(SIGPIPE, SIG_IGN);   /* as ffmpeg and ffprobe do: a parent gone is EPIPE, a fault */
     /* 1: a line for each input, for seeds; 2: and each system call the protocol makes. */
-    G.trace = getenv("FFSTREAMER_FUZZ_TRACE") ? atoi(getenv("FFSTREAMER_FUZZ_TRACE")) : 0;
+    G.trace = getenv("FDPROXY_FUZZ_TRACE") ? atoi(getenv("FDPROXY_FUZZ_TRACE")) : 0;
     G.buffer = av_malloc(BUFFER_BYTES);
     return G.buffer ? 0 : -1;
 }
@@ -1496,7 +1496,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
     if (G.responsive) {
         uint8_t hello[4];
-        queue_header(&G.p, FFS_HELLO, G.hello_sequence, 4);
+        queue_header(&G.p, FDP_HELLO, G.hello_sequence, 4);
         AV_WL16(hello, (uint16_t)G.hello_lowest);
         AV_WL16(hello + 2, (uint16_t)G.hello_highest);
         queue_bytes(&G.p, hello, 4);
@@ -1506,7 +1506,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         queue_event(&G.p, (header[0] & 64) ? EV_STALL : EV_CLOSE, 0);
     }
 
-    G.main_h = make_context("ffstreamer:", AVIO_FLAG_READ, read_fd, write_fd, G.cache_requested);
+    G.main_h = make_context("fdproxy:", AVIO_FLAG_READ, read_fd, write_fd, G.cache_requested);
     if (!G.main_h)
         goto end;
     begin_op();
@@ -1530,7 +1530,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     if (G.responsive && !G.disturbed)
         CHECK(G.expect_open == 0, "an open succeeded that the specification refuses");
     {
-        FFStreamerContext *c = G.main_h->priv_data;
+        FDProxyContext *c = G.main_h->priv_data;
         CHECK(G.dups_count == 2 && c->read_fd == G.p.dup_read && c->write_fd == G.p.dup_write,
               "the session does not work on two duplicates of the caller's descriptors");
         CHECK((fcntl(c->read_fd, F_GETFD) & FD_CLOEXEC) && (fcntl(c->write_fd, F_GETFD) & FD_CLOEXEC),

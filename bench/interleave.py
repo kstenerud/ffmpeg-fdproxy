@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measures the bytes each run shape is served through ffstreamer, against films whose tracks are
+"""Measures the bytes each run shape is served through fdproxy, against films whose tracks are
 stored one after another, for the block cache's size and the budget's figures (DESIGN.md, The Block Cache).
 
     interleave.py --bin DIR --work DIR [--quick]

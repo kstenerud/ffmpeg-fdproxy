@@ -9,7 +9,7 @@ if [ ! -f config_components.h ] || [ /src/configure -nt config_components.h ]; t
   /src/configure --prefix=/out --disable-doc --disable-debug --enable-gpl --disable-autodetect \
     > /build/configure.log 2>&1 || { tail -30 /build/configure.log; exit 1; }
 fi
-grep -q "CONFIG_FFSTREAMER_PROTOCOL 1" config_components.h && echo "ffstreamer: enabled" || { echo "ffstreamer: NOT enabled"; exit 1; }
+grep -q "CONFIG_FDPROXY_PROTOCOL 1" config_components.h && echo "fdproxy: enabled" || { echo "fdproxy: NOT enabled"; exit 1; }
 if ! make -j12 > /build/make.log 2>&1; then echo "MAKE FAILED"; grep -n -B2 -A6 "error" /build/make.log | head -60; exit 1; fi
 if ! make install > /build/install.log 2>&1; then echo "INSTALL FAILED"; tail -20 /build/install.log; exit 1; fi
-echo built; /out/bin/ffmpeg -hide_banner -protocols 2>/dev/null | grep -w ffstreamer
+echo built; /out/bin/ffmpeg -hide_banner -protocols 2>/dev/null | grep -w fdproxy

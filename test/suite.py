@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The ffstreamer suite: every run shape read directly and through the protocol, compared,
+"""The fdproxy suite: every run shape read directly and through the protocol, compared,
 then the failure paths through the reference parent.
 
     suite.py --bin DIR --media DIR
@@ -96,7 +96,7 @@ class Suite:
 
         case("a whole film read through succeeds", succeeds)
         case("one READ outstanding at a time also succeeds", succeeds, "--outstanding", "1")
-        case("the options' names before 2026-10-24 still name the channel", succeeds, "--old-names")
+        case("the protocol's and options' names before 2026-10-24 still name the channel", succeeds, "--old-names")
         case("small blocks (64 KiB) succeed", succeeds, "--block", "65536")
         case("the parent's channel ends mid-film: CHANNEL, non-zero exit", ends("CHANNEL"), "--die-after", "20")
         case("a wrong sequence number: PROTOCOL, non-zero exit", ends("PROTOCOL"), "--wrong-number-at", "10")

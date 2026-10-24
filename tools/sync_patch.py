@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Rewrite patches/9000's new-file hunk for libavformat/ffstreamer.c from src/ as it stands.
+"""Rewrite patches/9000's new-file hunk for libavformat/fdproxy.c from src/ as it stands.
 
     sync_patch.py
 
-src/libavformat/ffstreamer.c is where the protocol is edited; this carries it into the patch, which
+src/libavformat/fdproxy.c is where the protocol is edited; this carries it into the patch, which
 check_patch.py then confirms. The patch's other hunks are left as they are."""
 import os, sys
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PATCH = os.path.join(HERE, "patches", "9000-ffstreamer-protocol.patch")
-SOURCE = os.path.join(HERE, "src", "libavformat", "ffstreamer.c")
-NAME = "libavformat/ffstreamer.c"
+PATCH = os.path.join(HERE, "patches", "9000-fdproxy-protocol.patch")
+SOURCE = os.path.join(HERE, "src", "libavformat", "fdproxy.c")
+NAME = "libavformat/fdproxy.c"
 
 
 def main():

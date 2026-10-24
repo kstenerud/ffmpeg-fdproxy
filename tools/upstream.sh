@@ -50,16 +50,16 @@ set -e
 apt-get update -qq >/dev/null
 apt-get install -y -qq gcc make pkg-config texinfo >/dev/null 2>&1
 mkdir /objs && cd /objs
-/src/configure --disable-everything --enable-protocol=ffstreamer --disable-autodetect --disable-asm \
+/src/configure --disable-everything --enable-protocol=fdproxy --disable-autodetect --disable-asm \
     > configure.log 2>&1 || { tail -30 configure.log; exit 1; }
-grep -q "^#define CONFIG_FFSTREAMER_PROTOCOL 1" config_components.h \
-    || { echo "configure did not enable ffstreamer"; exit 1; }
+grep -q "^#define CONFIG_FDPROXY_PROTOCOL 1" config_components.h \
+    || { echo "configure did not enable fdproxy"; exit 1; }
 make -j"$(nproc)" doc/ffmpeg-protocols.html > make.log 2>&1 || { grep -n -B2 -A6 -i error make.log | head -40; exit 1; }
-make -j"$(nproc)" libavformat/tests/ffstreamer > build.log 2>&1 || { grep -n -B2 -A6 -i error build.log | head -40; exit 1; }
+make -j"$(nproc)" libavformat/tests/fdproxy > build.log 2>&1 || { grep -n -B2 -A6 -i error build.log | head -40; exit 1; }
 # The series adds no warning of its own to the build.
-if grep -A3 "ffstreamer[^ ]*: warning:" build.log make.log; then exit 1; fi
+if grep -A3 "fdproxy[^ ]*: warning:" build.log make.log; then exit 1; fi
 # On a failure, what the test printed, whole: the reference to compare, or to write anew.
-make fate-ffstreamer SAMPLES= > fate.log 2>&1 || {
-    tail -5 fate.log; echo "--- what the test printed:"; cat tests/data/fate/ffstreamer; exit 1; }
+make fate-fdproxy SAMPLES= > fate.log 2>&1 || {
+    tail -5 fate.log; echo "--- what the test printed:"; cat tests/data/fate/fdproxy; exit 1; }
 tail -1 fate.log
 '
