@@ -1,8 +1,8 @@
 #!/bin/sh
-# Checks out FFmpeg at the commit UPSTREAM_COMMIT names into build/ffmpeg-upstream, makes the
-# series for FFmpeg's own tree there (tools/upstream.py), and writes it into OUT_DIR as patches to
-# send. With --test it then builds the tree in Docker (debian:trixie) and runs the series' FATE test
-# and the protocols manual's build. It needs git, Python, the network and, for --test, Docker.
+# Checks out FFmpeg at the commit UPSTREAM_COMMIT names into build/ffmpeg-upstream, makes the two
+# series for FFmpeg's own tree there (tools/upstream.py), each on FFmpeg alone, and writes them into
+# OUT_DIR/fftools and OUT_DIR/protocol as patches to send apart. With --test it then makes both on one
+# tree, builds it in Docker (debian:trixie) and runs the FATE test and the protocols manual's build. It needs git, Python, the network and, for --test, Docker.
 #
 #     upstream.sh [--test] OUT_DIR
 set -eu
@@ -24,19 +24,26 @@ if [ ! -d "$work/.git" ]; then
     git -C "$work" remote add origin https://github.com/FFmpeg/FFmpeg
 fi
 git -C "$work" fetch --quiet --depth 1 origin "$commit"
-git -C "$work" checkout --quiet --force --detach "$commit"
-git -C "$work" clean --quiet -fdx
 # The series is the owner's: their name on each commit, as on this repository's.
 git -C "$work" config user.name "$(git -C "$here" config user.name)"
 git -C "$work" config user.email "$(git -C "$here" config user.email)"
-python3 "$here/tools/upstream.py" "$work"
-
 mkdir -p "$1"
 out=$(cd "$1" && pwd)
-rm -f "$out"/*.patch
-git -C "$work" format-patch --quiet --output-directory "$out" "$commit"
-echo "the series is in $out: $(ls "$out" | wc -l) patches on FFmpeg $(echo "$commit" | cut -c1-12)"
+rm -rf "$out"/*.patch "$out/fftools" "$out/protocol"
+
+# FFmpeg as UPSTREAM_COMMIT names it, then the series named.
+make_series() {
+    git -C "$work" checkout --quiet --force --detach "$commit"
+    git -C "$work" clean --quiet -fdx
+    python3 "$here/tools/upstream.py" "$work" "$1"
+}
+for series in fftools protocol; do
+    make_series $series
+    git -C "$work" format-patch --quiet --output-directory "$out/$series" "$commit"
+    echo "the $series series is in $out/$series: $(ls "$out/$series" | wc -l) patches on FFmpeg $(echo "$commit" | cut -c1-12)"
+done
 [ "$test" = yes ] || exit 0
+make_series all
 
 docker run --rm -v "$work":/src:ro debian:trixie bash -c '
 set -e

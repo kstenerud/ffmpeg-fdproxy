@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Make the series for FFmpeg's own tree from this repository, one commit per change.
 
-    upstream.py FFMPEG_TREE
+    upstream.py FFMPEG_TREE [fftools|protocol|all]
+
+There are two series, to be sent apart (UPSTREAMING.md, The Series): fftools, how ffmpeg and ffprobe
+end when an input's reads fail, for every input; and protocol, ffstreamer itself. Each applies to
+FFmpeg alone; all makes both, fftools first.
 
 FFMPEG_TREE is a clean checkout of FFmpeg (tools/upstream.sh checks out the commit UPSTREAM_COMMIT
 names). Each change is made by inserting lines at an anchor in FFmpeg's file, so the series follows
@@ -153,7 +157,7 @@ def probe(tree):
 
 
 # Each commit: what it changes, and its message in FFmpeg's form.
-SERIES = [
+PROTOCOL = [
     (protocol, """avformat/ffstreamer: add the ffstreamer protocol
 
 ffstreamer reads an input whose every byte a parent process serves, by
@@ -186,6 +190,8 @@ Its parent serves any offset, so a seek costs no more than reading on,
 and reading forward in place of a seek read megabytes the demuxer never
 needed.
 """),
+]
+FFTOOLS = [
     (demux, """fftools/ffmpeg_demux: fail when reading an input failed
 
 Without -xerror, an error while demuxing is logged and the input ends
@@ -230,10 +236,16 @@ def added_lines(diff, paths):
     return added
 
 
-def check_against_patches(tree, base):
+SERIES = {"fftools": FFTOOLS, "protocol": PROTOCOL, "all": FFTOOLS + PROTOCOL}
+# The files each series changes that patches/ changes too, for jellyfin.
+CHECKED = {"fftools": ["fftools/ffmpeg_demux.c", "fftools/ffmpeg.c", "fftools/ffprobe.c"],
+           "protocol": ["libavformat/seek.c"]}
+CHECKED["all"] = CHECKED["fftools"] + CHECKED["protocol"]
+
+
+def check_against_patches(tree, base, paths):
     """The fftools and seek.c changes are written twice, in patches/ for jellyfin and here for
     FFmpeg; fails when what they add differs."""
-    paths = ["fftools/ffmpeg_demux.c", "fftools/ffmpeg.c", "fftools/ffprobe.c", "libavformat/seek.c"]
     ours = added_lines(subprocess.run(["git", "-C", tree, "diff", base, "HEAD", "--", *paths],
                                       capture_output=True, text=True, check=True).stdout, paths)
     jellyfin = {}
@@ -245,18 +257,19 @@ def check_against_patches(tree, base):
 
 
 def main(argv):
-    if len(argv) != 1:
+    if len(argv) not in (1, 2) or (len(argv) == 2 and argv[1] not in SERIES):
         print(__doc__, file=sys.stderr)
         return 2
     tree = argv[0]
+    name = argv[1] if len(argv) == 2 else "all"
     base = subprocess.run(["git", "-C", tree, "rev-parse", "HEAD"], capture_output=True, text=True,
                           check=True).stdout.strip()
-    for change, message in SERIES:
+    for change, message in SERIES[name]:
         change(tree)
         git(tree, "add", "-A")
         git(tree, "commit", "--quiet", "-m", message)
-    check_against_patches(tree, base)
-    print(f"{len(SERIES)} commits in {tree}, adding what patches/ add")
+    check_against_patches(tree, base, CHECKED[name])
+    print(f"the {name} series: {len(SERIES[name])} commits in {tree}, adding what patches/ add")
     return 0
 
 
