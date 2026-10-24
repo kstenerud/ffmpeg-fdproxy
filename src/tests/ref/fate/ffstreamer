@@ -34,15 +34,31 @@ open: 0
 read 12288 bytes
 then failed: yes, interrupted: no
 DONE: none
+the parent trickles its first DATA:
+open: 0
+read 0 bytes
+then failed: yes, interrupted: yes
+DONE: err, kind 4
 a REQUEST whose block is 0:
 open refused: yes
 its descriptors closed: yes
 DONE: err, kind 1
 descriptors that are no pipe:
 open refused: yes
+its descriptors left open: yes
+descriptors that cannot be a channel:
+one descriptor for both: refused: yes
+stdin: refused: yes
+each the other's direction: refused: yes
+its descriptors left open: yes
+a pipe to the parent that is full:
+open interrupted: yes
 its descriptors closed: yes
 a second session on an open pipe:
 first open: 0
 second open refused: yes
 its descriptors left open: yes
+an open sharing only its write pipe refused: yes
+its descriptors left open: yes
+the open session reads on: yes
 DONE: ok

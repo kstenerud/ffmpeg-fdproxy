@@ -125,53 +125,75 @@ typedef struct FFStreamerContext {
     int fault_kind;     ///< DONE's kind for the fault
     int done_sent;      ///< DONE has been sent
 
-    int     claimed;    ///< the parent's pipe is claimed for this session
-    dev_t   claimed_device; ///< the claimed pipe's device
-    ino_t   claimed_inode;  ///< the claimed pipe's inode
+    int     claimed;    ///< the channel's pipes are claimed for this session
+    dev_t   claimed_device[2]; ///< the claimed pipes' devices, read then write
+    ino_t   claimed_inode[2];  ///< the claimed pipes' inodes, read then write
     struct FFStreamerContext *next_claim; ///< the next session claimed
 } FFStreamerContext;
 
-/* The sessions open in this process, by the pipe the parent's messages
- * arrive on: a pipe serves one session at a time, through whichever
- * descriptor reaches it. */
+/* The sessions open in this process, by their pipes: a pipe serves one
+ * session at a time, through whichever descriptor reaches it. */
 static AVMutex claims_lock = AV_MUTEX_INITIALIZER;
 static FFStreamerContext *claims;
 
 /**
- * Claims the session's pipe for as long as it is open: EBUSY when another
- * open session has it, EBADF when the descriptor is not a pipe.
+ * Checks that fd is a pipe open for access_mode, and gives its identity.
+ * Changes nothing: the descriptor is not the session's yet.
+ */
+static int check_descriptor(URLContext *h, int fd, int access_mode,
+                            struct stat *facts)
+{
+    int flags;
+
+    if (fstat(fd, facts) < 0 || !S_ISFIFO(facts->st_mode)) {
+        av_log(h, AV_LOG_ERROR, "ffstreamer: descriptor %d is not a pipe\n",
+               fd);
+        return AVERROR(EBADF);
+    }
+    flags = fcntl(fd, F_GETFL);
+    if (flags < 0 || (flags & O_ACCMODE) != access_mode) {
+        av_log(h, AV_LOG_ERROR,
+               "ffstreamer: descriptor %d is not open for its direction\n", fd);
+        return AVERROR(EBADF);
+    }
+    return 0;
+}
+
+/**
+ * Claims the session's two pipes for as long as it is open: EBUSY when
+ * another open session has either, EBADF when a descriptor is not a pipe
+ * open for its direction.
  */
 static int claim_channel(URLContext *h)
 {
     FFStreamerContext *c = h->priv_data;
-    struct stat facts;
-    int ret = 0;
+    struct stat facts[2];
+    int ret;
 
-    if (fstat(c->read_fd, &facts) < 0 || !S_ISFIFO(facts.st_mode)) {
-        av_log(h, AV_LOG_ERROR, "ffstreamer: descriptor %d is not a pipe\n",
-               c->read_fd);
-        ret = AVERROR(EBADF);
-        goto end;
-    }
+    if ((ret = check_descriptor(h, c->read_fd, O_RDONLY, &facts[0])) < 0 ||
+        (ret = check_descriptor(h, c->write_fd, O_WRONLY, &facts[1])) < 0)
+        return ret;
     ff_mutex_lock(&claims_lock);
-    for (FFStreamerContext *other = claims; other; other = other->next_claim) {
-        if (other->claimed_device == facts.st_dev &&
-            other->claimed_inode == facts.st_ino) {
-            av_log(h, AV_LOG_ERROR,
-                   "ffstreamer: the channel on descriptor %d is open already\n",
-                   c->read_fd);
-            ret = AVERROR(EBUSY);
-            goto unlock;
+    for (FFStreamerContext *other = claims; other; other = other->next_claim)
+        for (int mine = 0; mine < 2; mine++)
+            for (int theirs = 0; theirs < 2; theirs++)
+                if (other->claimed_device[theirs] == facts[mine].st_dev &&
+                    other->claimed_inode[theirs] == facts[mine].st_ino)
+                    ret = AVERROR(EBUSY);
+    if (!ret) {
+        for (int i = 0; i < 2; i++) {
+            c->claimed_device[i] = facts[i].st_dev;
+            c->claimed_inode[i]  = facts[i].st_ino;
         }
+        c->next_claim = claims;
+        claims        = c;
+        c->claimed    = 1;
     }
-    c->claimed_device = facts.st_dev;
-    c->claimed_inode  = facts.st_ino;
-    c->next_claim     = claims;
-    claims            = c;
-    c->claimed        = 1;
-unlock:
     ff_mutex_unlock(&claims_lock);
-end:
+    if (ret)
+        av_log(h, AV_LOG_ERROR,
+               "ffstreamer: the channel on descriptors %d and %d is open "
+               "already\n", c->read_fd, c->write_fd);
     return ret;
 }
 
@@ -200,13 +222,36 @@ static int8_t next_sequence(int8_t sequence)
 /* --- Writing ------------------------------------------------------------ */
 
 /**
- * One write() of a whole frame, with SIGPIPE consumed rather than delivered,
- * whatever the program's disposition.
+ * Waits, in slices, for the pipe to take a frame, checking FFmpeg's
+ * interrupt between them. A frame is never larger than PIPE_BUF, so a pipe
+ * that has room takes it whole without blocking.
  */
-static int write_frame_locked(FFStreamerContext *c, uint8_t type,
+static int wait_for_room(URLContext *h)
+{
+    FFStreamerContext *c = h->priv_data;
+
+    for (;;) {
+        struct pollfd room = { .fd = c->write_fd, .events = POLLOUT };
+        int ready = poll(&room, 1, FFS_WAIT_SLICE_MS);
+
+        if (ready > 0)
+            return 0; /* room, or the pipe's end: write() says which */
+        if (ready < 0 && errno != EINTR)
+            return AVERROR(errno);
+        if (ff_check_interrupt(&h->interrupt_callback))
+            return AVERROR_EXIT;
+    }
+}
+
+/**
+ * One write() of a whole frame, once the pipe has room for it, with SIGPIPE
+ * consumed rather than delivered, whatever the program's disposition.
+ */
+static int write_frame_locked(URLContext *h, uint8_t type,
                               const uint8_t *body, int32_t body_length,
                               int8_t *sequence_out)
 {
+    FFStreamerContext *c = h->priv_data;
     uint8_t frame[FFS_MAX_SENT_FRAME];
     sigset_t pipe_set, old_set, pending;
     int was_pending, ret = 0;
@@ -232,8 +277,10 @@ static int write_frame_locked(FFStreamerContext *c, uint8_t type,
     pthread_sigmask(SIG_BLOCK, &pipe_set, &old_set);
 
     do {
+        if ((ret = wait_for_room(h)) < 0)
+            goto restore_mask;
         written = write(c->write_fd, frame, FFS_HEADER_BYTES + body_length);
-    } while (written < 0 && errno == EINTR);
+    } while (written < 0 && (errno == EINTR || errno == EAGAIN));
 
     if (written < 0) {
         ret = AVERROR(errno);
@@ -258,13 +305,14 @@ end:
 }
 
 /** Numbers and writes a frame under the session's lock. */
-static int write_frame(FFStreamerContext *c, uint8_t type, const uint8_t *body,
+static int write_frame(URLContext *h, uint8_t type, const uint8_t *body,
                        int32_t body_length, int8_t *sequence_out)
 {
+    FFStreamerContext *c = h->priv_data;
     int ret;
 
     ff_mutex_lock(&c->lock);
-    ret = write_frame_locked(c, type, body, body_length, sequence_out);
+    ret = write_frame_locked(h, type, body, body_length, sequence_out);
     ff_mutex_unlock(&c->lock);
     return ret;
 }
@@ -273,8 +321,8 @@ static int write_frame(FFStreamerContext *c, uint8_t type, const uint8_t *body,
 
 /**
  * Reads exactly length bytes, waiting as long as the parent likes, in
- * slices, checking FFmpeg's interrupt between them. End-of-file is the
- * channel ending.
+ * slices, checking FFmpeg's interrupt at every pass, so a parent that sends
+ * a byte at a time cannot keep it unseen. End-of-file is the channel ending.
  */
 static int read_exact(URLContext *h, uint8_t *buffer, int64_t length)
 {
@@ -292,15 +340,12 @@ static int read_exact(URLContext *h, uint8_t *buffer, int64_t length)
             ret = AVERROR(errno);
             goto end;
         }
-        if (ready <= 0) {
-            /* A slice passed, or a signal came: see whether FFmpeg wants
-             * to stop. */
-            if (ff_check_interrupt(&h->interrupt_callback)) {
-                ret = AVERROR_EXIT;
-                goto end;
-            }
-            continue;
+        if (ff_check_interrupt(&h->interrupt_callback)) {
+            ret = AVERROR_EXIT;
+            goto end;
         }
+        if (ready <= 0)
+            continue; /* a slice passed, or a signal came */
         want = (size_t)FFMIN(length - got, INT_MAX);
         n = read(c->read_fd, buffer + got, want);
         if (n < 0) {
@@ -363,11 +408,11 @@ static int kind_of(int error)
 /**
  * Records the first fault; every later read returns it. The channel ending is
  * an I/O error, never end-of-file: a parent that died must not look like the
- * end of the film.
+ * end of the film. Nor is it EAGAIN, which the caller would retry for ever.
  */
 static int set_fault(FFStreamerContext *c, int error)
 {
-    if (error == AVERROR_EOF)
+    if (error == AVERROR_EOF || error == AVERROR(EAGAIN))
         error = AVERROR(EIO);
     if (!c->fault) {
         c->fault = error;
@@ -406,7 +451,7 @@ static void send_done(URLContext *h, int kind, int error)
         memcpy(body + 16, message, message_length);
         length = 16 + (int32_t)message_length;
     }
-    if (write_frame(c, FFS_DONE, body, length, NULL) < 0)
+    if (write_frame(h, FFS_DONE, body, length, NULL) < 0)
         av_log(h, AV_LOG_WARNING,
                "ffstreamer: DONE could not be sent; the parent has gone\n");
 }
@@ -414,33 +459,17 @@ static void send_done(URLContext *h, int kind, int error)
 /* --- Opening ------------------------------------------------------------ */
 
 /**
- * Checks that fd is a pipe open for access_mode, sets FD_CLOEXEC, and clears
- * O_NONBLOCK, so a full pipe waits rather than failing with EAGAIN, which
- * this protocol never returns.
+ * Sets FD_CLOEXEC on a claimed descriptor, and clears O_NONBLOCK, so a pipe
+ * waits rather than failing with EAGAIN, which this protocol never returns.
  */
-static int check_descriptor(URLContext *h, int fd, int access_mode)
+static int prepare_descriptor(int fd)
 {
-    struct stat facts;
-    int flags, ret = 0;
+    int flags = fcntl(fd, F_GETFL);
 
-    if (fstat(fd, &facts) < 0 || !S_ISFIFO(facts.st_mode)) {
-        av_log(h, AV_LOG_ERROR, "ffstreamer: descriptor %d is not a pipe\n",
-               fd);
-        ret = AVERROR(EBADF);
-        goto end;
-    }
-    flags = fcntl(fd, F_GETFL);
-    if (flags < 0 || (flags & O_ACCMODE) != access_mode) {
-        av_log(h, AV_LOG_ERROR,
-               "ffstreamer: descriptor %d is not open for its direction\n", fd);
-        ret = AVERROR(EBADF);
-        goto end;
-    }
-    if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0 ||
+    if (flags < 0 || fcntl(fd, F_SETFD, FD_CLOEXEC) < 0 ||
         ((flags & O_NONBLOCK) && fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) < 0))
-        ret = AVERROR(errno);
-end:
-    return ret;
+        return AVERROR(errno);
+    return 0;
 }
 
 /**
@@ -449,14 +478,13 @@ end:
  */
 static int exchange_hellos(URLContext *h)
 {
-    FFStreamerContext *c = h->priv_data;
     uint8_t body[4];
     int16_t lowest, highest;
     int ret;
 
     AV_WL16(body, FFS_VERSION_LOWEST);
     AV_WL16(body + 2, FFS_VERSION_HIGHEST);
-    if ((ret = write_frame(c, FFS_HELLO, body, 4, NULL)) < 0)
+    if ((ret = write_frame(h, FFS_HELLO, body, 4, NULL)) < 0)
         goto end;
     if ((ret = read_header(h, FFS_HELLO, 0, 4, NULL)) < 0)
         goto end;
@@ -557,30 +585,32 @@ static int ffstreamer_open(URLContext *h, const char *url, int flags)
     int64_t blocks_in_file;
     int version, ret;
 
-    /* The descriptors are the session's from here: an open that fails
-     * closes them, but for a pipe that serves another session already,
-     * whose descriptors may be that session's own, which it leaves alone.
-     * So the claim is checked before anything else can fail. */
-    if (c->read_fd < 0 || c->write_fd < 0) {
-        av_log(h, AV_LOG_ERROR, "ffstreamer: -ffstreamer_read_fd and "
-               "-ffstreamer_write_fd are required\n");
-        ret = AVERROR(EINVAL);
-        goto fail;
-    }
-    if ((ret = claim_channel(h)) < 0)
-        goto refused;
+    /* An open refused for its arguments leaves the descriptors as they
+     * were: they may be another session's, or the caller's. Once both pipes
+     * are claimed, the descriptors are the session's, and an open that
+     * fails closes them. */
     if (strcmp(url, "ffstreamer:")) {
         av_log(h, AV_LOG_ERROR,
                "ffstreamer: the URL must be exactly \"ffstreamer:\"\n");
         ret = AVERROR(EINVAL);
-        goto fail;
+        goto refused;
     }
     if (flags & AVIO_FLAG_WRITE) {
         ret = AVERROR(EINVAL);
-        goto fail;
+        goto refused;
     }
-    if ((ret = check_descriptor(h, c->read_fd, O_RDONLY)) < 0 ||
-        (ret = check_descriptor(h, c->write_fd, O_WRONLY)) < 0)
+    if (c->read_fd <= STDERR_FILENO || c->write_fd <= STDERR_FILENO ||
+        c->read_fd == c->write_fd) {
+        av_log(h, AV_LOG_ERROR, "ffstreamer: -ffstreamer_read_fd and "
+               "-ffstreamer_write_fd are required, distinct, and neither "
+               "stdin, stdout nor stderr\n");
+        ret = AVERROR(EINVAL);
+        goto refused;
+    }
+    if ((ret = claim_channel(h)) < 0)
+        goto refused;
+    if ((ret = prepare_descriptor(c->read_fd)) < 0 ||
+        (ret = prepare_descriptor(c->write_fd)) < 0)
         goto fail;
 
     c->next_sequence = 0;
@@ -593,7 +623,7 @@ static int ffstreamer_open(URLContext *h, const char *url, int flags)
     AV_WL32(body, FFS_PREFERRED_BLOCK);
     AV_WL32(body + 4, FFS_LARGEST_BODY);
     body[8] = FFS_OUTSTANDING_CAP;
-    ret = write_frame(c, FFS_CAPABILITY, body, 9, &capability_sequence);
+    ret = write_frame(h, FFS_CAPABILITY, body, 9, &capability_sequence);
     if (ret < 0)
         goto fail;
 
@@ -639,10 +669,6 @@ fail:
     close_descriptors(c);
     goto end;
 refused:
-    /* Another session's pipe is left to that session; a descriptor that is
-     * no pipe was given to this one, and goes. */
-    if (ret != AVERROR(EBUSY))
-        close_descriptors(c);
     c->read_fd = c->write_fd = -1;
 end:
     return ret;
@@ -697,7 +723,7 @@ static int send_read(URLContext *h, int64_t index)
     }
     AV_WL64(body, (uint64_t)(index * c->block));
     AV_WL32(body + 8, (uint32_t)length);
-    if ((ret = write_frame(c, FFS_READ, body, 12, &sequence)) < 0) {
+    if ((ret = write_frame(h, FFS_READ, body, 12, &sequence)) < 0) {
         ret = set_fault(c, ret);
         goto end;
     }

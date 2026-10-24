@@ -5,8 +5,9 @@ patches on top of [jellyfin-ffmpeg](https://github.com/jellyfin/jellyfin-ffmpeg)
 a protocol over which a parent process serves every read FFmpeg makes of its input, by byte offset,
 over two pipes it hands down.
 
-FFmpeg confined by a sandbox (Landlock, seccomp, or a container) can then read its input with no
-path to the file, no socket, and no other way to reach the storage. The parent decides every read,
+A sandbox (Landlock, seccomp, or a container) that leaves FFmpeg no path to the file, no socket,
+and no other way to reach the storage then still lets it read its input: the confinement is the
+sandbox's, and the protocol is what makes it workable. The parent decides every read,
 and can schedule, pace, share or refuse it. Storage that stops answering (such as a network share
 that has gone away) holds a thread of the parent, which notices and can always end the run, rather
 than FFmpeg waiting in the kernel where it cannot be killed. Each side checks every frame the other
@@ -111,10 +112,18 @@ Docker, fails on any warning in the series' files, builds the protocols manual, 
 pipes and reads it through the public avio API, against `src/tests/ref/fate/ffstreamer`. It reads
 through, by seeks and at random through a cache of two blocks; meets a parent that leaves, stalls
 (ended by the interrupt), misnumbers a `DATA` (the fault sticks) or stops reading (SIGPIPE at its
-default); and checks the descriptors: made blocking, closed after a session and a failed open, left
-alone by an `EBUSY`. Each of these faults injected into the protocol fails it: LRU eviction made
-MRU, the sticky fault, the interrupt check, the sequence check or the SIGPIPE mask removed, a
-refused open's descriptors kept, `O_NONBLOCK` kept.
+default) or sends a `DATA` a byte at a time (the interrupt is seen between bytes); waits for room in
+a full request pipe until interrupted; and checks the descriptors: made blocking, closed after a
+session and an open that fails once they are claimed, left open by an open refused for them (no
+pipe, the wrong way round, one descriptor for both, stdin) and by an `EBUSY`, including one that
+shares only a live session's write pipe, which reads on. Each of these faults injected into the
+protocol fails it: LRU eviction made MRU, the sticky fault, the interrupt check, the sequence check
+or the SIGPIPE mask removed, a refused open's descriptors kept, `O_NONBLOCK` kept; and the old
+protocol fails the byte-at-a-time, full-pipe, refusal and write-pipe cases.
+
+Media servers that burn subtitles in (`-vf subtitles=f=...`) or use `movie=` open those files by
+name, outside any whitelist: such a run needs a path to the subtitle file, or the file extracted
+first through this protocol.
 
 ## Layout
 

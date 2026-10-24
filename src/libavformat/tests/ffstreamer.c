@@ -52,6 +52,7 @@ enum Behaviour {
     MISNUMBERS,     ///< numbers its next DATA wrongly
     STALLS,         ///< answers nothing more, and waits
     STOPS_READING,  ///< closes both its pipes, without reading DONE
+    TRICKLES,       ///< sends its next DATA a byte at a time
 };
 
 /** The parent's side of one session, which serve() runs in a thread. */
@@ -179,9 +180,10 @@ static void *serve(void *opaque)
         }
         if (misbehaves && p->behaviour == STOPS_READING) {
             /* The protocol sees its channel end, and its DONE meets a
-             * pipe no one reads. */
-            close(p->to_child);
+             * pipe no one reads: the one it writes is closed first, so
+             * no write of its lands before the close. */
             close(p->from_child);
+            close(p->to_child);
             p->to_child = p->from_child = -1;
             return NULL;
         }
@@ -193,11 +195,35 @@ static void *serve(void *opaque)
             sequence = (sequence + 1) % 128;
         if (misbehaves && p->behaviour == STALLS && p->stalled)
             *p->stalled = 1;
+        if (misbehaves && p->behaviour == TRICKLES && p->to_child >= 0) {
+            /* Interrupted once its first byte is sent, the protocol must
+             * not wait out the rest, which never stops coming. */
+            uint8_t header[6] = { DATA, sequence };
+
+            AV_WL32(header + 2, wanted);
+            if (write(p->to_child, header, 6) != 6)
+                wanted = -1;
+            for (int i = 0; i < wanted; i++) {
+                if (write(p->to_child, p->file + offset + i, 1) != 1)
+                    break;
+                if (p->stalled)
+                    *p->stalled = 1;
+                usleep(5000);
+            }
+            close(p->to_child);
+            p->to_child = -1;
+            continue;
+        }
         if (p->to_child < 0 || (misbehaves && p->behaviour == STALLS))
             continue;
         if (write_frame(p->to_child, DATA, sequence, p->file + offset,
-                        wanted) < 0)
-            break;
+                        wanted) < 0) {
+            /* The protocol closed while this READ, a prefetch, was
+             * outstanding: its DONE is still to be read. */
+            close(p->to_child);
+            p->to_child = -1;
+            continue;
+        }
         answered++;
     }
 end:
@@ -444,7 +470,7 @@ static void test_bad_terms(const uint8_t *file)
     print_done(&s.parent);
 }
 
-/** Descriptors that are no pipe were given to the open, which closes them. */
+/** Descriptors that are no pipe are refused, and left to the caller. */
 static void test_no_pipe(void)
 {
     AVDictionary *options = NULL;
@@ -458,17 +484,87 @@ static void test_no_pipe(void)
     av_dict_set_int(&options, "ffstreamer_write_fd", write_fd, 0);
     ret = avio_open2(&pb, "ffstreamer:", AVIO_FLAG_READ, NULL, &options);
     printf("open refused: %s\n", yes(ret == AVERROR(EBADF)));
-    printf("its descriptors closed: %s\n",
-           yes(is_closed(read_fd) && is_closed(write_fd)));
+    printf("its descriptors left open: %s\n",
+           yes(!close(read_fd) && !close(write_fd)));
     av_dict_free(&options);
 }
 
-static void test_one_session_a_pipe(const uint8_t *file)
+/** Opens with the descriptors given, and says whether it was refused. */
+static void refuse(const char *what, int read_fd, int write_fd, int error)
+{
+    AVDictionary *options = NULL;
+    AVIOContext *pb = NULL;
+    int ret;
+
+    av_dict_set_int(&options, "ffstreamer_read_fd", read_fd, 0);
+    av_dict_set_int(&options, "ffstreamer_write_fd", write_fd, 0);
+    ret = avio_open2(&pb, "ffstreamer:", AVIO_FLAG_READ, NULL, &options);
+    printf("%s: refused: %s\n", what, yes(ret == error));
+    avio_closep(&pb);
+    av_dict_free(&options);
+}
+
+/** Descriptors that cannot be a channel are refused, and left open. */
+static void test_bad_descriptors(void)
+{
+    int channel[2];
+
+    printf("descriptors that cannot be a channel:\n");
+    if (pipe(channel) < 0) {
+        printf("cannot start\n");
+        return;
+    }
+    refuse("one descriptor for both", channel[0], channel[0], AVERROR(EINVAL));
+    refuse("stdin", STDIN_FILENO, channel[1], AVERROR(EINVAL));
+    refuse("each the other's direction", channel[1], channel[0],
+           AVERROR(EBADF));
+    printf("its descriptors left open: %s\n",
+           yes(!close(channel[0]) && !close(channel[1])));
+}
+
+static int always(void *opaque)
+{
+    return 1;
+}
+
+/**
+ * A pipe to the parent that is full, the parent reading none of it: the
+ * protocol waits for room, and its interrupt ends the wait.
+ */
+static void test_full_pipe(void)
+{
+    AVIOInterruptCB interrupt = { always, NULL };
+    AVDictionary *options = NULL;
+    AVIOContext *pb = NULL;
+    uint8_t filler[4096] = { 0 };
+    int to_child[2], from_child[2], ret;
+
+    printf("a pipe to the parent that is full:\n");
+    if (pipe(to_child) < 0 || pipe(from_child) < 0) {
+        printf("cannot start\n");
+        return;
+    }
+    fcntl(from_child[1], F_SETFL, O_NONBLOCK);
+    while (write(from_child[1], filler, sizeof(filler)) > 0)
+        ;
+    av_dict_set_int(&options, "ffstreamer_read_fd", to_child[0], 0);
+    av_dict_set_int(&options, "ffstreamer_write_fd", from_child[1], 0);
+    ret = avio_open2(&pb, "ffstreamer:", AVIO_FLAG_READ, &interrupt, &options);
+    printf("open interrupted: %s\n", yes(ret == AVERROR_EXIT));
+    printf("its descriptors closed: %s\n",
+           yes(is_closed(to_child[0]) && is_closed(from_child[1])));
+    avio_closep(&pb);
+    av_dict_free(&options);
+    close(to_child[1]);
+    close(from_child[0]);
+}
+
+static void test_one_session_a_pipe(const uint8_t *file, uint8_t *buffer)
 {
     AVIOContext *first = NULL, *second = NULL;
     AVDictionary *options = NULL;
     Session s;
-    int read_copy, write_copy, ret;
+    int read_copy, write_copy, fresh[2], ret;
 
     printf("a second session on an open pipe:\n");
     if (start(&s, file, BLOCK, ANSWERS, 0) < 0) {
@@ -487,6 +583,26 @@ static void test_one_session_a_pipe(const uint8_t *file)
            yes(!close(read_copy) && !close(write_copy)));
     av_dict_free(&options);
     avio_closep(&second);
+    /* A pipe of its own to read, but the open session's to write: refused
+     * before it writes a frame into that session's. */
+    if (pipe(fresh) < 0) {
+        printf("cannot start\n");
+        return;
+    }
+    write_copy = dup(s.child_write);
+    av_dict_set_int(&options, "ffstreamer_read_fd", fresh[0], 0);
+    av_dict_set_int(&options, "ffstreamer_write_fd", write_copy, 0);
+    ret = avio_open2(&second, "ffstreamer:", AVIO_FLAG_READ, NULL, &options);
+    printf("an open sharing only its write pipe refused: %s\n",
+           yes(ret == AVERROR(EBUSY)));
+    printf("its descriptors left open: %s\n",
+           yes(!close(write_copy) && !close(fresh[0]) && !close(fresh[1])));
+    av_dict_free(&options);
+    avio_closep(&second);
+    if (first)
+        printf("the open session reads on: %s\n",
+               yes(read_through(first, buffer, 5000) == 5000 &&
+                   !memcmp(buffer, file, 5000)));
     avio_closep(&first);
     finish(&s);
     print_done(&s.parent);
@@ -517,9 +633,15 @@ int main(void)
      * consume it, whatever the program's disposition. */
     test_misbehaving(file, buffer, "the parent stops reading after 3 answers",
                      STOPS_READING, 3);
+    /* Its first: the protocol is certainly waiting for it when the
+     * interrupt comes. */
+    test_misbehaving(file, buffer, "the parent trickles its first DATA",
+                     TRICKLES, 0);
     test_bad_terms(file);
     test_no_pipe();
-    test_one_session_a_pipe(file);
+    test_bad_descriptors();
+    test_full_pipe();
+    test_one_session_a_pipe(file, buffer);
     av_free(buffer);
     av_free(file);
     return 0;

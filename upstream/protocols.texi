@@ -1,10 +1,10 @@
 @section ffstreamer
 
 Read an input whose every byte a parent process serves, by offset, over two
-pipes it hands down. FFmpeg confined by a sandbox can then read its input with
-no path to the file, no socket and no other way to reach the storage: the
-parent decides every read, and storage that stops answering holds the parent,
-which can always end the run, rather than FFmpeg waiting in the kernel.
+pipes it hands down. A sandbox that leaves FFmpeg no path to the file and no
+socket then still lets it read its input: the parent decides every read, and
+storage that stops answering holds the parent, which can always end the run,
+rather than FFmpeg waiting in the kernel.
 
 The parent speaks the ffstreamer protocol, specified at
 @url{https://github.com/kstenerud/ffmpeg-ffstreamer}. It creates the two pipes,
@@ -12,9 +12,12 @@ hands FFmpeg one end of each, and names them with the options below. The URL is
 exactly @code{ffstreamer:}, with nothing after it. Reading only; each pipe
 serves one session at a time.
 
-The protocol takes the two descriptors when it is opened, and closes them when
-the session closes or the open fails; an open refused with @code{EBUSY},
-because the pipe serves another session already, leaves them as they were.
+An open refused for its options leaves the two descriptors as they were: one
+missing, the same descriptor twice, stdin, stdout or stderr, one that is no
+pipe or open the wrong way (@code{EINVAL} or @code{EBADF}), or a pipe that
+serves another session already (@code{EBUSY}). Otherwise the descriptors are
+the session's, and the protocol closes them when the session closes or the
+open fails.
 
 It needs @code{sigtimedwait()}, so it is not built on macOS or OpenBSD.
 
@@ -31,7 +34,7 @@ The descriptor this side's messages go out on. Required.
 How many of the parent's blocks to keep, from 2 to 1024. Default 32.
 @end table
 
-The parent should restrict the input to this protocol, since a nested open
+The parent must restrict the input to this protocol, since a nested open
 could otherwise name one of the channel's descriptors with @code{pipe:} or
 @code{fd:}:
 @example

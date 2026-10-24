@@ -142,7 +142,7 @@ Two patches, after jellyfin-ffmpeg's own series (`debian/patches/series`, applie
 | File                                                  | What                                            |
 | ----------------------------------------------------- | ----------------------------------------------- |
 | `libavformat/ffstreamer.c` (new; from `src/`)         | the protocol                                    |
-| `libavformat/protocols.c`, `Makefile`, `configure`    | one line each, registering it; `configure`'s `ffstreamer_protocol_deps` drops it on builds without POSIX pipes (win64) |
+| `libavformat/protocols.c`, `Makefile`, `configure`    | one line each, registering it; `configure`'s `ffstreamer_protocol_deps` (`poll_h pthreads sigtimedwait`) drops it on builds without them: win64, macOS and OpenBSD |
 | `libavformat/seek.c`                                  | one name added to the protocols FFmpeg treats as local ([The Block Cache](#the-block-cache)) |
 | `fftools/ffmpeg_demux.c`, `ffmpeg.c`, `ffprobe.c`     | the exit status of a failed read, about 15 lines |
 
