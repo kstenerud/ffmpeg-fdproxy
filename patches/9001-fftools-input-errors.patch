@@ -63,7 +63,15 @@
  
 --- a/fftools/ffprobe.c
 +++ b/fftools/ffprobe.c
-@@ -2731,6 +2731,16 @@
+@@ -28,6 +28,7 @@
+ 
+ #include <string.h>
+ #include <math.h>
++#include <signal.h>
+ 
+ #include "libavformat/avformat.h"
+ #include "libavformat/version.h"
+@@ -2731,6 +2732,16 @@
      }
  
  end:
@@ -80,3 +88,14 @@
      if (ifile.fmt_ctx)
          close_input_file(&ifile);
      av_freep(&nb_streams_frames);
+@@ -3340,6 +3351,10 @@
+ 
+     init_dynload();
+ 
++#ifdef SIGPIPE
++    signal(SIGPIPE, SIG_IGN); /* a write to a closed pipe fails, as in ffmpeg */
++#endif
++
+     setvbuf(stderr, NULL, _IONBF, 0); /* win32 runtime needs this */
+ 
+     av_log_set_flags(AV_LOG_SKIP_REPEATED);

@@ -47,10 +47,12 @@ class Parent:
             print(f"refparent: pipe size refused ({error}); going on at the default", file=sys.stderr)
 
     def input_arguments(self):
+        # --old-names: the options' names before 2026-10-24, which this repository's build still takes.
+        prefix = "ffstreamer_" if self.args.old_names else ""
         return ["-protocol_whitelist", "ffstreamer",
-                "-ffstreamer_read_fd", str(self.child_read),
-                "-ffstreamer_write_fd", str(self.child_write),
-                *(["-ffstreamer_cache_blocks", str(self.args.cache_blocks)] if self.args.cache_blocks else []),
+                f"-{prefix}read_fd", str(self.child_read),
+                f"-{prefix}write_fd", str(self.child_write),
+                *([f"-{prefix}cache_blocks", str(self.args.cache_blocks)] if self.args.cache_blocks else []),
                 "-i", "ffstreamer:"]
 
     def write(self, data):
@@ -315,6 +317,7 @@ def main():
     parser.add_argument("--signal-after-ms", type=int)
     parser.add_argument("--signal", type=int, default=15)
     parser.add_argument("--signals", type=int, default=1, help="how many signals --signal-after-ms sends")
+    parser.add_argument("--old-names", action="store_true", help="name the options as before 2026-10-24")
     parser.add_argument("--signal-at-hello", action="store_true", help="signal once FFmpeg's HELLO arrives")
     parser.add_argument("--capture", action="store_true", help="hash the child's stdout")
     parser.add_argument("--trace", help="write each READ answered to this file: offset and length, a line each")

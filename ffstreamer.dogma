@@ -23,8 +23,8 @@ written_by_ffmpeg = 1;
 written_by_parent = 2;
 pipe: uinteger    = """
 Which pipe of the channel this is: `written_by_ffmpeg` for the one FFmpeg writes and the parent
-reads (FFmpeg's -ffstreamer_write_fd), `written_by_parent` for the one the parent writes and FFmpeg
-reads (FFmpeg's -ffstreamer_read_fd).
+reads (FFmpeg's -write_fd), `written_by_parent` for the one the parent writes and FFmpeg
+reads (FFmpeg's -read_fd).
 """;
 
 

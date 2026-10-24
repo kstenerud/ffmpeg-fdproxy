@@ -12,32 +12,32 @@ hands FFmpeg one end of each, and names them with the options below. The URL is
 exactly @code{ffstreamer:}, with nothing after it. Reading only; each pipe
 serves one session at a time.
 
-An open refused for its options leaves the two descriptors as they were: one
-missing, the same descriptor twice, stdin, stdout or stderr, one that is no
-pipe or open the wrong way (@code{EINVAL} or @code{EBADF}), or a pipe that
-serves another session already (@code{EBUSY}). Otherwise the descriptors are
-the session's, and the protocol closes them when the session closes or the
-open fails.
+Like @code{fd:}, the protocol works on duplicates of the two descriptors and
+never closes or changes them: they stay the caller's. It refuses the same
+descriptor twice, stdin, stdout or stderr (@code{EINVAL}), a descriptor that is
+no pipe or is open the wrong way (@code{EBADF}), and a pipe an open session
+uses (@code{EBUSY}).
 
-It needs @code{sigtimedwait()}, so it is not built on macOS or OpenBSD.
+A write to a pipe whose reader has gone raises @code{SIGPIPE}, which the
+program must ignore, as @command{ffmpeg} and @command{ffprobe} do.
 
 This protocol accepts the following options:
 
 @table @option
-@item ffstreamer_read_fd
+@item read_fd
 The descriptor the parent's messages arrive on. Required.
 
-@item ffstreamer_write_fd
+@item write_fd
 The descriptor this side's messages go out on. Required.
 
-@item ffstreamer_cache_blocks
+@item cache_blocks
 How many of the parent's blocks to keep, from 2 to 1024. Default 32.
 @end table
 
-The parent must restrict the input to this protocol, since a nested open
-could otherwise name one of the channel's descriptors with @code{pipe:} or
-@code{fd:}:
+Its default whitelist is itself, so a demuxer's nested open cannot name one of
+the channel's descriptors with @code{pipe:} or @code{fd:}. A program that sets
+its own whitelist should still name only this protocol:
 @example
-ffmpeg -protocol_whitelist ffstreamer -ffstreamer_read_fd 4 -ffstreamer_write_fd 5 -i ffstreamer: ...
+ffmpeg -protocol_whitelist ffstreamer -read_fd 4 -write_fd 5 -i ffstreamer: ...
 @end example
 

@@ -202,13 +202,17 @@ channel: stdout carries results, and a stray write there would corrupt a channel
 
 Each input restricts itself to this protocol and names its channel:
 
-    -protocol_whitelist ffstreamer -ffstreamer_read_fd 4 -ffstreamer_write_fd 5 -ffstreamer_cache_blocks 48 -i ffstreamer:
+    -protocol_whitelist ffstreamer -read_fd 4 -write_fd 5 -cache_blocks 48 -i ffstreamer:
 
-| Option                    | Meaning                                                                                        |
-| ------------------------- | ---------------------------------------------------------------------------------------------- |
-| `-ffstreamer_read_fd`     | The descriptor FFmpeg reads the parent's messages from. Default -1.                           |
-| `-ffstreamer_write_fd`    | The descriptor FFmpeg writes its own messages to. Default -1.                                  |
-| `-ffstreamer_cache_blocks`| How many blocks FFmpeg's side keeps ([Reading in Blocks](#reading-in-blocks)), 2 to 1,024. Default 32. |
+| Option          | Meaning                                                                                        |
+| --------------- | ---------------------------------------------------------------------------------------------- |
+| `-read_fd`      | The descriptor FFmpeg reads the parent's messages from. Default -1.                           |
+| `-write_fd`     | The descriptor FFmpeg writes its own messages to. Default -1.                                  |
+| `-cache_blocks` | How many blocks FFmpeg's side keeps ([Reading in Blocks](#reading-in-blocks)), 2 to 1,024. Default 32. |
+
+ffmpeg-ffstreamer's build also takes the names before 2026-10-24, `-ffstreamer_read_fd`,
+`-ffstreamer_write_fd` and `-ffstreamer_cache_blocks`, until its users have moved; FFmpeg's own tree
+takes only the names above.
 
 * The options are decoding options. An open with either descriptor left at -1, both the same
   descriptor, or either of them stdin, stdout or stderr **MUST** fail.
@@ -238,26 +242,26 @@ Each input restricts itself to this protocol and names its channel:
 
 * **MUST** check that each is a FIFO opened for its direction;
 * **MUST** refuse to be opened for writing;
-* once it has claimed them (below), **MUST** set `FD_CLOEXEC` on both descriptors, and clear
-  `O_NONBLOCK`, so a full pipe waits rather than failing.
+* **MUST** work on duplicates of its own, close-on-exec, and **MUST NOT** close or change the
+  descriptors it was given, as `fd:` does not: they are the caller's, whatever the outcome. A pipe
+  handed over non-blocking stays so; FFmpeg's side polls before every read and write, and takes
+  `EAGAIN` as a reason to poll again.
 
 That check is a sanity check. The proof that the parent is on the other end is the `HELLO` round
 trip.
 
-**A channel carries one session.** FFmpeg's side **MUST** refuse (`EBUSY`) to open a channel either
-of whose pipes is already open in the process, through whichever descriptor reaches it, and **MUST**
-close both its descriptors when the session closes, so no later open reaches those pipes again
-through them: unread `DATA` may still be in one. It knows a pipe by `fstat`'s device and inode, not
-by descriptor number, which the process reuses for new pipes. A second open given a fresh pipe to
-read and a live session's to write would otherwise write its `HELLO` into that session's requests.
+**A channel carries one session at a time.** FFmpeg's side **MUST** refuse (`EBUSY`) to open a
+channel either of whose pipes an open session uses, through whichever descriptor reaches it. It
+knows a pipe by `fstat`'s device and inode, not by descriptor number. A second open given a fresh
+pipe to read and a live session's to write would otherwise write its `HELLO` into that session's
+requests. Once a session has closed, its pipes may be opened again; bytes it left unread in them
+then arrive where the new session's opening exchange expects `HELLO`, which fails it, so nothing
+left over is ever taken for the new session's file.
 
-**The descriptors are the session's once claimed.** An open refused for its arguments, before both
-pipes are claimed, **MUST** leave the descriptors as they were: a missing, repeated or standard
-descriptor, one that is no pipe or open the wrong way, and a pipe that serves another session
-already, whose descriptors may be that session's own. FFmpeg's I/O layer refuses some opens before
-the protocol runs at all (an option out of range, a protocol not whitelisted), which leaves them the
-same way. Once both are claimed, an open that fails **MUST** close both. So the caller still holds
-the descriptors after a refusal, and the parent's reader sees end-of-file after any later failure.
+**The caller's descriptors stay open,** after a session and after any refusal or failure: closing
+them is the caller's. In the `ffmpeg` and `ffprobe` tools they close when the process exits, so
+the parent's reader of requests reaches end-of-file at FFmpeg's exit, and takes the run's end from
+the exit in any case ([End of a Run](#end-of-a-run)).
 
 
 ### Pipe Sizes
@@ -529,7 +533,7 @@ therefore end with `DONE` `OK` and a non-zero exit. The exit status decides.
 * **Exactly once for each channel that received a well-formed `REQUEST`:**
     * from the open, when the open fails after the `REQUEST` arrived, by a `TERMS` refusal or by a
       resource failure (also sent as `TERMS`, with its code). FFmpeg never calls the close of an open
-      that failed, so the open's failure path also frees its own state and closes its descriptors
+      that failed, so the open's failure path also frees its own state and closes its duplicates
       ([Descriptors](#descriptors));
     * from the close, otherwise.
 * **Never before a well-formed `REQUEST`.** If the opening exchange fails, the open fails, FFmpeg
@@ -783,27 +787,22 @@ layer retries for ever: it is reported as `EIO`.
 
 ### Writing a Frame
 
-One `write()`, guarded against SIGPIPE whatever the program:
+One `write()` of the whole frame, once the pipe has room for it, waited for interruptibly
+([Waiting and Interrupts](#waiting-and-interrupts)). A frame is never larger than `PIPE_BUF`, so
+the pipe takes it whole or not at all, blocking or not.
 
-1. note whether SIGPIPE is already pending;
-2. block it with `pthread_sigmask`;
-3. wait for room, interruptibly ([Waiting and Interrupts](#waiting-and-interrupts)), then write;
-4. on `EPIPE`, if it wasn't already pending, consume it with a zero-timeout `sigtimedwait`;
-5. restore the mask.
-
-`sigpending` counts signals pending for the whole process as well as for the thread, so a SIGPIPE
-already pending for the process leaves this write's own pending for the thread, not consumed. Only a
-program that blocks SIGPIPE in every thread can have one pending for the process, and such a program
-collects its pending signals itself; the extra one is a second SIGPIPE it would have ignored.
+A write to a pipe whose reader has gone raises SIGPIPE, as for any pipe FFmpeg writes. FFmpeg's side
+touches no signal: the program **MUST** ignore SIGPIPE, as `ffmpeg` does and ffmpeg-ffstreamer's
+`ffprobe` does, and the write then fails with `EPIPE`, a fault like any other.
 
 
 ### Closing
 
 The close sends `DONE` ([When DONE Is Sent](#when-done-is-sent)), unless it has been sent already,
-then closes its descriptors. It does not drain `DATA` still owed: the parent's write of it fails with
-`EPIPE` once the descriptors close (or blocks until FFmpeg exits, where another copy of the read end
-lives on), which harms nothing, since writers are per channel. The parent **MUST** expect that
-failure while the run ends, and still read the `DONE` that came before it.
+then closes its duplicates. It does not drain `DATA` still owed: the parent's write of it blocks
+until FFmpeg exits, since the caller's copy of the pipe's read end lives on, and then fails with
+`EPIPE`, which harms nothing, since writers are per channel. The parent **MUST** expect that failure
+while the run ends, and still read the `DONE` that came before it.
 
 
 ### Exit Status
@@ -948,8 +947,8 @@ written_by_ffmpeg = 1;
 written_by_parent = 2;
 pipe: uinteger    = """
 Which pipe of the channel this is: `written_by_ffmpeg` for the one FFmpeg writes and the parent
-reads (FFmpeg's -ffstreamer_write_fd), `written_by_parent` for the one the parent writes and FFmpeg
-reads (FFmpeg's -ffstreamer_read_fd).
+reads (FFmpeg's -write_fd), `written_by_parent` for the one the parent writes and FFmpeg
+reads (FFmpeg's -read_fd).
 """;
 
 

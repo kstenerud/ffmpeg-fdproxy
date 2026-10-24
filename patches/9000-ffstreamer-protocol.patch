@@ -1,6 +1,6 @@
 --- a/libavformat/ffstreamer.c
 +++ b/libavformat/ffstreamer.c
-@@ -0,0 +1,927 @@
+@@ -0,0 +1,813 @@
 +/*
 + * ffstreamer: reads an input whose every byte a parent process serves over
 + * two inherited pipes, by offset. See ffstreamer-specification.md in the
@@ -29,10 +29,8 @@
 +#include <fcntl.h>
 +#include <limits.h>
 +#include <poll.h>
-+#include <signal.h>
 +#include <string.h>
 +#include <sys/stat.h>
-+#include <time.h>
 +#include <unistd.h>
 +
 +#include "libavutil/avstring.h"
@@ -99,9 +97,12 @@
 +
 +typedef struct FFStreamerContext {
 +    const AVClass *class;
-+    int read_fd;        ///< where the parent's messages arrive
-+    int write_fd;       ///< where this side's messages go
++    int read_fd_option;  ///< the caller's descriptor the parent's messages arrive on
++    int write_fd_option; ///< the caller's descriptor this side's messages go out on
 +    int cache_blocks;   ///< how many blocks the cache holds
++
++    int read_fd;        ///< the session's own duplicate of read_fd_option
++    int write_fd;       ///< the session's own duplicate of write_fd_option
 +
 +    int     accepted;   ///< REQUEST's terms were taken
 +    int64_t run;        ///< the parent's number for the run, from REQUEST
@@ -110,7 +111,6 @@
 +    int32_t longest;    ///< the longest READ, from REQUEST
 +    int8_t  outstanding_allowed; ///< READs that may be outstanding at once
 +
-+    AVMutex lock;       ///< held over numbering and writing a frame
 +    int8_t  next_sequence; ///< the number the next frame sent takes
 +
 +    FFStreamerBlock *blocks; ///< the cache, cache_blocks of them
@@ -139,24 +139,20 @@
 +static AVMutex claims_lock = AV_MUTEX_INITIALIZER;
 +static FFStreamerContext *claims;
 +
-+/**
-+ * Checks that fd is a pipe open for access_mode, and gives its identity.
-+ * Changes nothing: the descriptor is not the session's yet.
-+ */
++/** Checks that fd is a pipe open for access_mode, and gives its identity. */
 +static int check_descriptor(URLContext *h, int fd, int access_mode,
 +                            struct stat *facts)
 +{
 +    int flags;
 +
 +    if (fstat(fd, facts) < 0 || !S_ISFIFO(facts->st_mode)) {
-+        av_log(h, AV_LOG_ERROR, "ffstreamer: descriptor %d is not a pipe\n",
-+               fd);
++        av_log(h, AV_LOG_ERROR, "Descriptor %d is not a pipe\n", fd);
 +        return AVERROR(EBADF);
 +    }
 +    flags = fcntl(fd, F_GETFL);
 +    if (flags < 0 || (flags & O_ACCMODE) != access_mode) {
-+        av_log(h, AV_LOG_ERROR,
-+               "ffstreamer: descriptor %d is not open for its direction\n", fd);
++        av_log(h, AV_LOG_ERROR, "Descriptor %d is not open for its direction\n",
++               fd);
 +        return AVERROR(EBADF);
 +    }
 +    return 0;
@@ -173,8 +169,8 @@
 +    struct stat facts[2];
 +    int ret;
 +
-+    if ((ret = check_descriptor(h, c->read_fd, O_RDONLY, &facts[0])) < 0 ||
-+        (ret = check_descriptor(h, c->write_fd, O_WRONLY, &facts[1])) < 0)
++    if ((ret = check_descriptor(h, c->read_fd_option, O_RDONLY, &facts[0])) < 0 ||
++        (ret = check_descriptor(h, c->write_fd_option, O_WRONLY, &facts[1])) < 0)
 +        return ret;
 +    ff_mutex_lock(&claims_lock);
 +    for (FFStreamerContext *other = claims; other; other = other->next_claim)
@@ -195,8 +191,8 @@
 +    ff_mutex_unlock(&claims_lock);
 +    if (ret)
 +        av_log(h, AV_LOG_ERROR,
-+               "ffstreamer: the channel on descriptors %d and %d is open "
-+               "already\n", c->read_fd, c->write_fd);
++               "The channel on descriptors %d and %d is open already\n",
++               c->read_fd_option, c->write_fd_option);
 +    return ret;
 +}
 +
@@ -247,24 +243,20 @@
 +}
 +
 +/**
-+ * One write() of a whole frame, once the pipe has room for it, with SIGPIPE
-+ * consumed rather than delivered, whatever the program's disposition.
++ * Numbers a frame and writes it whole, in one write(), once the pipe has room
++ * for it. A parent that has gone raises SIGPIPE, which the program ignores,
++ * as for any pipe FFmpeg writes.
 + */
-+static int write_frame_locked(URLContext *h, uint8_t type,
-+                              const uint8_t *body, int32_t body_length,
-+                              int8_t *sequence_out)
++static int write_frame(URLContext *h, uint8_t type, const uint8_t *body,
++                       int32_t body_length, int8_t *sequence_out)
 +{
 +    FFStreamerContext *c = h->priv_data;
 +    uint8_t frame[FFS_MAX_SENT_FRAME];
-+    sigset_t pipe_set, old_set, pending;
-+    int was_pending, ret = 0;
 +    ssize_t written;
++    int ret;
 +
-+    if (body_length < 0 ||
-+        body_length > FFS_MAX_SENT_FRAME - FFS_HEADER_BYTES) {
-+        ret = AVERROR(EINVAL);
-+        goto end;
-+    }
++    if (body_length < 0 || body_length > FFS_MAX_SENT_FRAME - FFS_HEADER_BYTES)
++        return AVERROR(EINVAL);
 +
 +    frame[0] = type;
 +    frame[1] = (uint8_t)c->next_sequence;
@@ -272,52 +264,20 @@
 +    if (body_length)
 +        memcpy(frame + FFS_HEADER_BYTES, body, body_length);
 +
-+    sigemptyset(&pipe_set);
-+    sigaddset(&pipe_set, SIGPIPE);
-+    sigemptyset(&pending);
-+    sigpending(&pending);
-+    was_pending = sigismember(&pending, SIGPIPE);
-+    pthread_sigmask(SIG_BLOCK, &pipe_set, &old_set);
-+
 +    do {
 +        if ((ret = wait_for_room(h)) < 0)
-+            goto restore_mask;
++            return ret;
 +        written = write(c->write_fd, frame, FFS_HEADER_BYTES + body_length);
 +    } while (written < 0 && (errno == EINTR || errno == EAGAIN));
 +
-+    if (written < 0) {
-+        ret = AVERROR(errno);
-+        if (errno == EPIPE && !was_pending) {
-+            struct timespec zero = { 0, 0 };
-+            sigtimedwait(&pipe_set, NULL, &zero);
-+        }
-+        goto restore_mask;
-+    }
-+    if (written != FFS_HEADER_BYTES + body_length) {
-+        /* A pipe takes a frame this small whole or not at all. */
-+        ret = AVERROR(EIO);
-+        goto restore_mask;
-+    }
++    if (written < 0)
++        return AVERROR(errno);
++    if (written != FFS_HEADER_BYTES + body_length)
++        return AVERROR(EIO); /* a pipe takes a frame this small whole */
 +    if (sequence_out)
 +        *sequence_out = c->next_sequence;
 +    c->next_sequence = next_sequence(c->next_sequence);
-+restore_mask:
-+    pthread_sigmask(SIG_SETMASK, &old_set, NULL);
-+end:
-+    return ret;
-+}
-+
-+/** Numbers and writes a frame under the session's lock. */
-+static int write_frame(URLContext *h, uint8_t type, const uint8_t *body,
-+                       int32_t body_length, int8_t *sequence_out)
-+{
-+    FFStreamerContext *c = h->priv_data;
-+    int ret;
-+
-+    ff_mutex_lock(&c->lock);
-+    ret = write_frame_locked(h, type, body, body_length, sequence_out);
-+    ff_mutex_unlock(&c->lock);
-+    return ret;
++    return 0;
 +}
 +
 +/* --- Reading ------------------------------------------------------------ */
@@ -331,40 +291,29 @@
 +{
 +    FFStreamerContext *c = h->priv_data;
 +    int64_t got = 0;
-+    int ret = 0;
 +
 +    while (got < length) {
 +        struct pollfd waiting = { .fd = c->read_fd, .events = POLLIN };
 +        int ready = poll(&waiting, 1, FFS_WAIT_SLICE_MS);
-+        size_t want;
 +        ssize_t n;
 +
-+        if (ready < 0 && errno != EINTR) {
-+            ret = AVERROR(errno);
-+            goto end;
-+        }
-+        if (ff_check_interrupt(&h->interrupt_callback)) {
-+            ret = AVERROR_EXIT;
-+            goto end;
-+        }
++        if (ready < 0 && errno != EINTR)
++            return AVERROR(errno);
++        if (ff_check_interrupt(&h->interrupt_callback))
++            return AVERROR_EXIT;
 +        if (ready <= 0)
 +            continue; /* a slice passed, or a signal came */
-+        want = (size_t)FFMIN(length - got, INT_MAX);
-+        n = read(c->read_fd, buffer + got, want);
++        n = read(c->read_fd, buffer + got, (size_t)FFMIN(length - got, INT_MAX));
 +        if (n < 0) {
 +            if (errno == EINTR || errno == EAGAIN)
 +                continue;
-+            ret = AVERROR(errno);
-+            goto end;
++            return AVERROR(errno);
 +        }
-+        if (!n) {
-+            ret = AVERROR_EOF;
-+            goto end;
-+        }
++        if (!n)
++            return AVERROR_EOF;
 +        got += n;
 +    }
-+end:
-+    return ret;
++    return 0;
 +}
 +
 +/** Reads a header and checks its type, sequence and exact or bounded length. */
@@ -377,23 +326,20 @@
 +    int ret;
 +
 +    if ((ret = read_exact(h, header, FFS_HEADER_BYTES)) < 0)
-+        goto end;
++        return ret;
 +    length = (int32_t)AV_RL32(header + 2);
 +    if (header[0] != expected_type || (int8_t)header[1] != expected_sequence ||
-+        (int8_t)header[1] < 0 || length < 0 ||
-+        (expected_length >= 0 && length != expected_length)) {
++        length < 0 || (expected_length >= 0 && length != expected_length)) {
 +        av_log(h, AV_LOG_ERROR,
-+               "ffstreamer: the parent sent type %d, number %d, length %d; "
++               "The parent sent type %d, number %d, length %d; "
 +               "expected type %d, number %d, length %d\n",
 +               header[0], (int8_t)header[1], length,
 +               expected_type, expected_sequence, expected_length);
-+        ret = AVERROR(EPROTO);
-+        goto end;
++        return AVERROR_INVALIDDATA;
 +    }
 +    if (length_out)
 +        *length_out = length;
-+end:
-+    return ret;
++    return 0;
 +}
 +
 +/* --- Faults and DONE ---------------------------------------------------- */
@@ -403,7 +349,7 @@
 +{
 +    if (error == AVERROR_EXIT)
 +        return FFS_KIND_INTERRUPTED;
-+    if (error == AVERROR(EPROTO))
++    if (error == AVERROR_INVALIDDATA)
 +        return FFS_KIND_PROTOCOL;
 +    return FFS_KIND_CHANNEL;
 +}
@@ -455,24 +401,32 @@
 +        length = 16 + (int32_t)message_length;
 +    }
 +    if (write_frame(h, FFS_DONE, body, length, NULL) < 0)
-+        av_log(h, AV_LOG_WARNING,
-+               "ffstreamer: DONE could not be sent; the parent has gone\n");
++        av_log(h, AV_LOG_WARNING, "DONE could not be sent; the parent has gone\n");
 +}
 +
 +/* --- Opening ------------------------------------------------------------ */
 +
 +/**
-+ * Sets FD_CLOEXEC on a claimed descriptor, and clears O_NONBLOCK, so a pipe
-+ * waits rather than failing with EAGAIN, which this protocol never returns.
++ * The session's own duplicate of a descriptor the caller gave, close-on-exec,
++ * as fd: makes one: the caller's is never closed or changed here.
 + */
-+static int prepare_descriptor(int fd)
++static int duplicate(URLContext *h, int fd)
 +{
-+    int flags = fcntl(fd, F_GETFL);
++    int copy;
 +
-+    if (flags < 0 || fcntl(fd, F_SETFD, FD_CLOEXEC) < 0 ||
-+        ((flags & O_NONBLOCK) && fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) < 0))
-+        return AVERROR(errno);
-+    return 0;
++#ifdef F_DUPFD_CLOEXEC
++    copy = fcntl(fd, F_DUPFD_CLOEXEC, 0);
++#else
++    copy = dup(fd);
++#endif
++    if (copy < 0) {
++        int ret = AVERROR(errno);
++        av_log(h, AV_LOG_ERROR, "Descriptor %d could not be duplicated\n", fd);
++        return ret;
++    }
++    if (fcntl(copy, F_SETFD, FD_CLOEXEC) < 0)
++        av_log(h, AV_LOG_DEBUG, "Failed to set close on exec\n");
++    return copy;
 +}
 +
 +/**
@@ -487,27 +441,21 @@
 +
 +    AV_WL16(body, FFS_VERSION_LOWEST);
 +    AV_WL16(body + 2, FFS_VERSION_HIGHEST);
-+    if ((ret = write_frame(h, FFS_HELLO, body, 4, NULL)) < 0)
-+        goto end;
-+    if ((ret = read_header(h, FFS_HELLO, 0, 4, NULL)) < 0)
-+        goto end;
-+    if ((ret = read_exact(h, body, 4)) < 0)
-+        goto end;
++    if ((ret = write_frame(h, FFS_HELLO, body, 4, NULL)) < 0 ||
++        (ret = read_header(h, FFS_HELLO, 0, 4, NULL)) < 0 ||
++        (ret = read_exact(h, body, 4)) < 0)
++        return ret;
 +    lowest = (int16_t)AV_RL16(body);
 +    highest = (int16_t)AV_RL16(body + 2);
 +    if (lowest < 1 || highest < lowest ||
 +        FFMIN(highest, FFS_VERSION_HIGHEST) <
 +        FFMAX(lowest, FFS_VERSION_LOWEST)) {
 +        av_log(h, AV_LOG_ERROR,
-+               "ffstreamer: the parent speaks versions %d to %d, "
-+               "this side %d to %d\n",
++               "The parent speaks versions %d to %d, this side %d to %d\n",
 +               lowest, highest, FFS_VERSION_LOWEST, FFS_VERSION_HIGHEST);
-+        ret = AVERROR(EPROTO);
-+        goto end;
++        return AVERROR_INVALIDDATA;
 +    }
-+    ret = FFMIN(highest, FFS_VERSION_HIGHEST);
-+end:
-+    return ret;
++    return FFMIN(highest, FFS_VERSION_HIGHEST);
 +}
 +
 +/**
@@ -522,10 +470,9 @@
 +    int16_t request_version;
 +    int ret;
 +
-+    if ((ret = read_header(h, FFS_REQUEST, capability_sequence, 27, NULL)) < 0)
-+        goto end;
-+    if ((ret = read_exact(h, body, 27)) < 0)
-+        goto end;
++    if ((ret = read_header(h, FFS_REQUEST, capability_sequence, 27, NULL)) < 0 ||
++        (ret = read_exact(h, body, 27)) < 0)
++        return ret;
 +
 +    request_version         = (int16_t)AV_RL16(body);
 +    c->run                  = (int64_t)AV_RL64(body + 2);
@@ -536,9 +483,8 @@
 +
 +    if (request_version < 0 || c->run < 0 || c->size < 0 || c->block < 0 ||
 +        c->longest < 0 || c->outstanding_allowed < 0) {
-+        av_log(h, AV_LOG_ERROR, "ffstreamer: REQUEST has a negative field\n");
-+        ret = AVERROR(EPROTO);
-+        goto end;
++        av_log(h, AV_LOG_ERROR, "REQUEST has a negative field\n");
++        return AVERROR_INVALIDDATA;
 +    }
 +    if (request_version != version || c->run < 1 ||
 +        c->size > FFS_LARGEST_FILE ||
@@ -547,20 +493,13 @@
 +        c->outstanding_allowed < 1 ||
 +        c->outstanding_allowed > FFS_OUTSTANDING_CAP) {
 +        av_log(h, AV_LOG_ERROR,
-+               "ffstreamer: REQUEST's terms are outside what this side "
-+               "offered\n");
-+        ret = 1;
-+        goto end;
++               "REQUEST's terms are outside what this side offered\n");
++        return 1;
 +    }
-+    ret = 0;
-+end:
-+    return ret;
++    return 0;
 +}
 +
-+/**
-+ * Closing its descriptors ends the session's claim: no later open reaches
-+ * its pipe through them.
-+ */
++/** Closes the session's duplicates, never the caller's, and ends its claim. */
 +static void close_descriptors(FFStreamerContext *c)
 +{
 +    release_channel(c);
@@ -588,32 +527,27 @@
 +    int64_t blocks_in_file;
 +    int version, ret;
 +
-+    /* An open refused for its arguments leaves the descriptors as they
-+     * were: they may be another session's, or the caller's. Once both pipes
-+     * are claimed, the descriptors are the session's, and an open that
-+     * fails closes them. */
++    /* The session works on duplicates of the caller's descriptors, as fd:
++     * does, and never closes or changes the caller's: whatever the outcome,
++     * they are the caller's to close. */
++    c->read_fd = c->write_fd = -1;
 +    if (strcmp(url, "ffstreamer:")) {
-+        av_log(h, AV_LOG_ERROR,
-+               "ffstreamer: the URL must be exactly \"ffstreamer:\"\n");
-+        ret = AVERROR(EINVAL);
-+        goto refused;
++        av_log(h, AV_LOG_ERROR, "The URL must be exactly \"ffstreamer:\"\n");
++        return AVERROR(EINVAL);
 +    }
-+    if (flags & AVIO_FLAG_WRITE) {
-+        ret = AVERROR(EINVAL);
-+        goto refused;
-+    }
-+    if (c->read_fd <= STDERR_FILENO || c->write_fd <= STDERR_FILENO ||
-+        c->read_fd == c->write_fd) {
-+        av_log(h, AV_LOG_ERROR, "ffstreamer: -ffstreamer_read_fd and "
-+               "-ffstreamer_write_fd are required, distinct, and neither "
-+               "stdin, stdout nor stderr\n");
-+        ret = AVERROR(EINVAL);
-+        goto refused;
++    if (flags & AVIO_FLAG_WRITE)
++        return AVERROR(EINVAL);
++    if (c->read_fd_option <= STDERR_FILENO ||
++        c->write_fd_option <= STDERR_FILENO ||
++        c->read_fd_option == c->write_fd_option) {
++        av_log(h, AV_LOG_ERROR, "-read_fd and -write_fd are required, "
++               "distinct, and neither stdin, stdout nor stderr\n");
++        return AVERROR(EINVAL);
 +    }
 +    if ((ret = claim_channel(h)) < 0)
-+        goto refused;
-+    if ((ret = prepare_descriptor(c->read_fd)) < 0 ||
-+        (ret = prepare_descriptor(c->write_fd)) < 0)
++        return ret;
++    if ((ret = c->read_fd = duplicate(h, c->read_fd_option)) < 0 ||
++        (ret = c->write_fd = duplicate(h, c->write_fd_option)) < 0)
 +        goto fail;
 +
 +    c->next_sequence = 0;
@@ -657,23 +591,18 @@
 +    }
 +
 +    c->accepted = 1;
-+    h->is_streamed = 0;
-+    ret = 0;
-+    goto end;
++    return 0;
 +
 +out_of_memory:
 +    send_done(h, FFS_KIND_TERMS, AVERROR(ENOMEM));
 +    ret = AVERROR(ENOMEM);
 +fail:
-+    if (ret == AVERROR_EOF)
++    /* Neither end-of-file nor EAGAIN, which the caller would retry. */
++    if (ret == AVERROR_EOF || ret == AVERROR(EAGAIN))
 +        ret = AVERROR(EIO);
 +    /* FFmpeg never calls the close of an open that failed. */
 +    free_cache(c);
 +    close_descriptors(c);
-+    goto end;
-+refused:
-+    c->read_fd = c->write_fd = -1;
-+end:
 +    return ret;
 +}
 +
@@ -719,17 +648,12 @@
 +    int32_t length = block_length(c, index);
 +    int8_t sequence;
 +
-+    if (slot < 0) {
-+        /* the cache is larger than what may be outstanding */
-+        ret = AVERROR_BUG;
-+        goto end;
-+    }
++    if (slot < 0)
++        return AVERROR_BUG; /* the cache is larger than what may be outstanding */
 +    AV_WL64(body, (uint64_t)(index * c->block));
 +    AV_WL32(body + 8, (uint32_t)length);
-+    if ((ret = write_frame(h, FFS_READ, body, 12, &sequence)) < 0) {
-+        ret = set_fault(c, ret);
-+        goto end;
-+    }
++    if ((ret = write_frame(h, FFS_READ, body, 12, &sequence)) < 0)
++        return set_fault(c, ret);
 +
 +    c->blocks[slot].index = index;
 +    c->blocks[slot].length = length;
@@ -741,8 +665,7 @@
 +    entry->length = length;
 +    entry->slot = slot;
 +    c->outstanding_count++;
-+end:
-+    return ret;
++    return 0;
 +}
 +
 +/** Takes the answer to the oldest outstanding READ into its block. */
@@ -754,21 +677,16 @@
 +
 +    ret = read_header(h, FFS_DATA, oldest->sequence, oldest->length, NULL);
 +    if (ret < 0)
-+        goto fault;
++        return set_fault(c, ret);
 +    /* The slot is freed no earlier than reading the DATA header (the
 +     * specification's READ). */
 +    c->outstanding_first = (c->outstanding_first + 1) % FFS_MAX_OUTSTANDING;
 +    c->outstanding_count--;
 +    if ((ret = read_exact(h, c->blocks[oldest->slot].data, oldest->length)) < 0)
-+        goto fault;
++        return set_fault(c, ret);
 +    c->blocks[oldest->slot].pending = 0;
 +    c->blocks[oldest->slot].last_used = ++c->use_clock;
-+    ret = 0;
-+    goto end;
-+fault:
-+    ret = set_fault(c, ret);
-+end:
-+    return ret;
++    return 0;
 +}
 +
 +/** Whether a READ for block index is awaiting its DATA. */
@@ -787,18 +705,12 @@
 +    int64_t index, blocks_in_file, within;
 +    int slot, ret;
 +
-+    if (c->fault) {
-+        ret = c->fault;
-+        goto end;
-+    }
-+    if (c->done_sent) {
-+        ret = AVERROR(EIO);
-+        goto end;
-+    }
-+    if (c->position >= c->size) {
-+        ret = AVERROR_EOF;
-+        goto end;
-+    }
++    if (c->fault)
++        return c->fault;
++    if (c->done_sent)
++        return AVERROR(EIO);
++    if (c->position >= c->size)
++        return AVERROR_EOF;
 +
 +    index = c->position / c->block;
 +    /* Rounded up without adding: a size near INT64_MAX must not overflow. */
@@ -807,10 +719,10 @@
 +    if ((slot = find_block(c, index)) < 0) {
 +        while (c->outstanding_count >= c->outstanding_allowed)
 +            if ((ret = receive_data(h)) < 0)
-+                goto end;
++                return ret;
 +        if ((slot = find_block(c, index)) < 0 &&
 +            (ret = send_read(h, index)) < 0)
-+            goto end;
++            return ret;
 +    }
 +
 +    /* The block about to be read is the most recently used, so a prefetch
@@ -821,14 +733,13 @@
 +    /* Prefetch when reading straight through. */
 +    if (index == c->last_needed + 1 && index + 1 < blocks_in_file &&
 +        find_block(c, index + 1) < 0 && !is_outstanding(c, index + 1) &&
-+        c->outstanding_count < c->outstanding_allowed && free_slot(c) >= 0) {
-+        if ((ret = send_read(h, index + 1)) < 0)
-+            goto end;
-+    }
++        c->outstanding_count < c->outstanding_allowed && free_slot(c) >= 0 &&
++        (ret = send_read(h, index + 1)) < 0)
++        return ret;
 +
 +    while ((slot = find_block(c, index)) < 0 || c->blocks[slot].pending)
 +        if ((ret = receive_data(h)) < 0)
-+            goto end;
++            return ret;
 +
 +    c->last_needed = index;
 +    c->blocks[slot].last_used = ++c->use_clock;
@@ -836,7 +747,6 @@
 +    ret = (int)FFMIN((int64_t)size, c->blocks[slot].length - within);
 +    memcpy(buf, c->blocks[slot].data + within, ret);
 +    c->position += ret;
-+end:
 +    return ret;
 +}
 +
@@ -846,26 +756,19 @@
 +    int64_t target, base;
 +
 +    switch (whence) {
-+    case AVSEEK_SIZE: target = c->size; goto end;
-+    case SEEK_SET:    target = position; break;
++    case AVSEEK_SIZE: return c->size;
++    case SEEK_SET:    base = 0;           break;
 +    case SEEK_CUR:    base = c->position; break;
-+    case SEEK_END:    base = c->size; break;
-+    default:          target = AVERROR(EINVAL); goto end;
++    case SEEK_END:    base = c->size;     break;
++    default:          return AVERROR(EINVAL);
 +    }
-+    if (whence != SEEK_SET) {
-+        /* base is never negative, so only a sum past INT64_MAX can overflow. */
-+        if (position > INT64_MAX - base) {
-+            target = AVERROR(EINVAL);
-+            goto end;
-+        }
-+        target = base + position;
-+    }
-+    if (target < 0) {
-+        target = AVERROR(EINVAL);
-+        goto end;
-+    }
++    /* base is never negative, so only a sum past INT64_MAX can overflow. */
++    if (position > INT64_MAX - base)
++        return AVERROR(EINVAL);
++    target = base + position;
++    if (target < 0)
++        return AVERROR(EINVAL);
 +    c->position = target;
-+end:
 +    return target;
 +}
 +
@@ -883,9 +786,14 @@
 +#define OFFSET(x) offsetof(FFStreamerContext, x)
 +#define D AV_OPT_FLAG_DECODING_PARAM
 +static const AVOption ffstreamer_options[] = {
-+    { "ffstreamer_read_fd",      "the descriptor the parent's messages arrive on", OFFSET(read_fd),      AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, D },
-+    { "ffstreamer_write_fd",     "the descriptor this side's messages go out on",  OFFSET(write_fd),     AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, D },
-+    { "ffstreamer_cache_blocks", "how many blocks to keep",                         OFFSET(cache_blocks), AV_OPT_TYPE_INT, { .i64 = 32 },  2,  1024,    D },
++    { "read_fd",      "The descriptor the parent's messages arrive on", OFFSET(read_fd_option),  AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, D },
++    { "write_fd",     "The descriptor this side's messages go out on",  OFFSET(write_fd_option), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, D },
++    { "cache_blocks", "How many of the parent's blocks to keep",        OFFSET(cache_blocks),    AV_OPT_TYPE_INT, { .i64 = 32 },  2,  1024,    D },
++    /* ffmpeg-ffstreamer only: the names before 2026-10-24, until its users move. */
++    { "ffstreamer_read_fd",      "Deprecated, use read_fd",      OFFSET(read_fd_option),  AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, D },
++    { "ffstreamer_write_fd",     "Deprecated, use write_fd",     OFFSET(write_fd_option), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, D },
++    { "ffstreamer_cache_blocks", "Deprecated, use cache_blocks", OFFSET(cache_blocks),    AV_OPT_TYPE_INT, { .i64 = 32 },  2,  1024,    D },
++    /* ffmpeg-ffstreamer only: end. */
 +    { NULL }
 +};
 +
@@ -896,37 +804,15 @@
 +    .version    = LIBAVUTIL_VERSION_INT,
 +};
 +
-+static int ffstreamer_init(URLContext *h, const char *url, int flags)
-+{
-+    FFStreamerContext *c = h->priv_data;
-+    int ret;
-+
-+    if ((ret = ff_mutex_init(&c->lock, NULL))) {
-+        ret = AVERROR(ret);
-+        goto end;
-+    }
-+    if ((ret = ffstreamer_open(h, url, flags)) < 0)
-+        ff_mutex_destroy(&c->lock);
-+end:
-+    return ret;
-+}
-+
-+static int ffstreamer_close_all(URLContext *h)
-+{
-+    FFStreamerContext *c = h->priv_data;
-+    int ret = ffstreamer_close(h);
-+    ff_mutex_destroy(&c->lock);
-+    return ret;
-+}
-+
 +const URLProtocol ff_ffstreamer_protocol = {
 +    .name                = "ffstreamer",
-+    .url_open            = ffstreamer_init,
++    .url_open            = ffstreamer_open,
 +    .url_read            = ffstreamer_read,
 +    .url_seek            = ffstreamer_seek,
-+    .url_close           = ffstreamer_close_all,
++    .url_close           = ffstreamer_close,
 +    .priv_data_size      = sizeof(FFStreamerContext),
 +    .priv_data_class     = &ffstreamer_class,
++    .default_whitelist   = "ffstreamer",
 +};
 --- a/libavformat/protocols.c
 +++ b/libavformat/protocols.c
@@ -950,30 +836,14 @@
  OBJS-$(CONFIG_GOPHERS_PROTOCOL)          += gopher.o
 --- a/configure
 +++ b/configure
-@@ -2556,6 +2556,7 @@
-     SetDllDirectory
-     setmode
-     setrlimit
-+    sigtimedwait
-     Sleep
-     strerror_r
-     sysconf
-@@ -4049,6 +4050,7 @@
+@@ -4049,6 +4049,7 @@
  ffrtmpcrypt_protocol_select="tcp_protocol"
  ffrtmphttp_protocol_conflict="librtmp_protocol"
  ffrtmphttp_protocol_select="http_protocol"
-+ffstreamer_protocol_deps="poll_h pthreads sigtimedwait"
++ffstreamer_protocol_deps="poll_h"
  ftp_protocol_select="tcp_protocol"
  gopher_protocol_select="tcp_protocol"
  gophers_protocol_select="tls_protocol"
-@@ -6985,6 +6987,7 @@
- check_func_headers sys/prctl.h prctl
- check_func  sched_getaffinity
- check_func  setrlimit
-+check_func_headers signal.h sigtimedwait
- check_struct "sys/stat.h" "struct stat" st_mtim.tv_nsec -D_BSD_SOURCE
- check_func  strerror_r
- check_func  sysconf
 --- a/libavformat/seek.c
 +++ b/libavformat/seek.c
 @@ -189,7 +189,11 @@

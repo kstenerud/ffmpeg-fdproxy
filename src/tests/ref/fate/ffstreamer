@@ -1,14 +1,14 @@
 read:
 open: 0
-blocking: yes
+their flags left as given: yes
 size: 100003
 read 100003 bytes, as served: yes
 seek to 50000: 50000
 read 3000 bytes, as served: yes
 seek to 10 before the end: 99993
 read 10 bytes, as served: yes, at the end: 1
+its descriptors left open, and none of its own: yes
 DONE: ok
-its descriptors closed: yes
 random reads through a cache of two blocks:
 open: 0
 300 reads, as served: 300
@@ -41,7 +41,7 @@ then failed: yes, interrupted: yes
 DONE: err, kind 4
 a REQUEST whose block is 0:
 open refused: yes
-its descriptors closed: yes
+its descriptors left open, and none of its own: yes
 DONE: err, kind 1
 descriptors that are no pipe:
 open refused: yes
@@ -53,7 +53,7 @@ each the other's direction: refused: yes
 its descriptors left open: yes
 a pipe to the parent that is full:
 open interrupted: yes
-its descriptors closed: yes
+its descriptors left open, and none of its own: yes
 a second session on an open pipe:
 first open: 0
 second open refused: yes

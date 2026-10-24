@@ -148,13 +148,7 @@ static void *serve(void *opaque)
     Parent *p = opaque;
     uint8_t body[1040];
     int expected = 0, sequence, length, type, answered = 0;
-    sigset_t pipe_signal;
 
-    /* The parent's own writes to a closed pipe fail; they must not end the
-     * process, whose SIGPIPE one test leaves at its default. */
-    sigemptyset(&pipe_signal);
-    sigaddset(&pipe_signal, SIGPIPE);
-    pthread_sigmask(SIG_BLOCK, &pipe_signal, NULL);
     if (open_session(p, &expected) < 0)
         goto end;
     while ((type = next_frame(p, &expected, &sequence, body, &length)) > 0) {
@@ -262,8 +256,8 @@ static int start(Session *s, const uint8_t *file, int32_t block,
         .block       = block,         .behaviour = behaviour,
         .answers     = answers,       .done_result = -1,
     };
-    av_dict_set_int(&s->options, "ffstreamer_read_fd", s->child_read, 0);
-    av_dict_set_int(&s->options, "ffstreamer_write_fd", s->child_write, 0);
+    av_dict_set_int(&s->options, "read_fd", s->child_read, 0);
+    av_dict_set_int(&s->options, "write_fd", s->child_write, 0);
     if (pthread_create(&s->thread, NULL, serve, &s->parent)) {
         close(to_child[0]);
         close(to_child[1]);
@@ -275,9 +269,14 @@ static int start(Session *s, const uint8_t *file, int32_t block,
     return 0;
 }
 
-/** Waits for the parent, which ends when the protocol closed its pipe. */
+/**
+ * Waits for the parent, which ends when the protocol's session ended, and
+ * closes the descriptors the session was given, which stay the caller's.
+ */
 static void finish(Session *s)
 {
+    close(s->child_read);
+    close(s->child_write);
     pthread_join(s->thread, NULL);
     if (s->parent.from_child >= 0)
         close(s->parent.from_child);
@@ -303,10 +302,20 @@ static const char *yes(int is_so)
     return is_so ? "yes" : "no";
 }
 
-/** Whether a descriptor is closed: the protocol's, after its session. */
-static int is_closed(int fd)
+/** Whether a descriptor is open: the caller's, after a session. */
+static int is_open(int fd)
 {
-    return fcntl(fd, F_GETFD) < 0;
+    return fcntl(fd, F_GETFD) >= 0;
+}
+
+/** How many descriptors are open, to see the protocol keeps none of its own. */
+static int open_count(void)
+{
+    int count = 0;
+
+    for (int fd = 0; fd < 1024; fd++)
+        count += is_open(fd);
+    return count;
 }
 
 static int read_through(AVIOContext *pb, uint8_t *buffer, int size)
@@ -323,22 +332,24 @@ static void test_read(const uint8_t *file, uint8_t *buffer)
 {
     AVIOContext *pb = NULL;
     Session s;
-    int ret;
+    int ret, before;
 
     printf("read:\n");
     if (start(&s, file, BLOCK, ANSWERS, 0) < 0) {
         printf("cannot start\n");
         return;
     }
-    /* Given non-blocking, which the protocol clears: a full pipe waits. */
+    /* Given non-blocking, which the protocol leaves as it is and copes
+     * with. */
     fcntl(s.child_read, F_SETFL, fcntl(s.child_read, F_GETFL) | O_NONBLOCK);
     fcntl(s.child_write, F_SETFL, fcntl(s.child_write, F_GETFL) | O_NONBLOCK);
+    before = open_count();
     ret = avio_open2(&pb, "ffstreamer:", AVIO_FLAG_READ, NULL, &s.options);
     printf("open: %d\n", ret);
     if (ret >= 0) {
-        printf("blocking: %s\n",
-               yes(!(fcntl(s.child_read, F_GETFL) & O_NONBLOCK) &&
-                   !(fcntl(s.child_write, F_GETFL) & O_NONBLOCK)));
+        printf("their flags left as given: %s\n",
+               yes((fcntl(s.child_read, F_GETFL) & O_NONBLOCK) &&
+                   (fcntl(s.child_write, F_GETFL) & O_NONBLOCK)));
         printf("size: %"PRId64"\n", avio_size(pb));
         ret = read_through(pb, buffer, FILE_SIZE);
         printf("read %d bytes, as served: %s\n", ret,
@@ -354,10 +365,11 @@ static void test_read(const uint8_t *file, uint8_t *buffer)
                yes(!memcmp(buffer, file + FILE_SIZE - 10, 10)), avio_feof(pb));
         avio_closep(&pb);
     }
+    printf("its descriptors left open, and none of its own: %s\n",
+           yes(is_open(s.child_read) && is_open(s.child_write) &&
+               open_count() == before));
     finish(&s);
     print_done(&s.parent);
-    printf("its descriptors closed: %s\n",
-           yes(is_closed(s.child_read) && is_closed(s.child_write)));
 }
 
 /**
@@ -376,7 +388,7 @@ static void test_random_reads(const uint8_t *file, uint8_t *buffer)
         printf("cannot start\n");
         return;
     }
-    av_dict_set_int(&s.options, "ffstreamer_cache_blocks", 2, 0);
+    av_dict_set_int(&s.options, "cache_blocks", 2, 0);
     ret = avio_open2(&pb, "ffstreamer:", AVIO_FLAG_READ | AVIO_FLAG_DIRECT,
                      NULL, &s.options);
     printf("open: %d\n", ret);
@@ -454,17 +466,19 @@ static void test_bad_terms(const uint8_t *file)
 {
     AVIOContext *pb = NULL;
     Session s;
-    int ret;
+    int ret, before;
 
     printf("a REQUEST whose block is 0:\n");
     if (start(&s, file, 0, ANSWERS, 0) < 0) {
         printf("cannot start\n");
         return;
     }
+    before = open_count();
     ret = avio_open2(&pb, "ffstreamer:", AVIO_FLAG_READ, NULL, &s.options);
     printf("open refused: %s\n", yes(ret == AVERROR(EINVAL)));
-    printf("its descriptors closed: %s\n",
-           yes(is_closed(s.child_read) && is_closed(s.child_write)));
+    printf("its descriptors left open, and none of its own: %s\n",
+           yes(is_open(s.child_read) && is_open(s.child_write) &&
+               open_count() == before));
     avio_closep(&pb);
     finish(&s);
     print_done(&s.parent);
@@ -480,8 +494,8 @@ static void test_no_pipe(void)
     int ret;
 
     printf("descriptors that are no pipe:\n");
-    av_dict_set_int(&options, "ffstreamer_read_fd", read_fd, 0);
-    av_dict_set_int(&options, "ffstreamer_write_fd", write_fd, 0);
+    av_dict_set_int(&options, "read_fd", read_fd, 0);
+    av_dict_set_int(&options, "write_fd", write_fd, 0);
     ret = avio_open2(&pb, "ffstreamer:", AVIO_FLAG_READ, NULL, &options);
     printf("open refused: %s\n", yes(ret == AVERROR(EBADF)));
     printf("its descriptors left open: %s\n",
@@ -496,8 +510,8 @@ static void refuse(const char *what, int read_fd, int write_fd, int error)
     AVIOContext *pb = NULL;
     int ret;
 
-    av_dict_set_int(&options, "ffstreamer_read_fd", read_fd, 0);
-    av_dict_set_int(&options, "ffstreamer_write_fd", write_fd, 0);
+    av_dict_set_int(&options, "read_fd", read_fd, 0);
+    av_dict_set_int(&options, "write_fd", write_fd, 0);
     ret = avio_open2(&pb, "ffstreamer:", AVIO_FLAG_READ, NULL, &options);
     printf("%s: refused: %s\n", what, yes(ret == error));
     avio_closep(&pb);
@@ -537,7 +551,7 @@ static void test_full_pipe(void)
     AVDictionary *options = NULL;
     AVIOContext *pb = NULL;
     uint8_t filler[4096] = { 0 };
-    int to_child[2], from_child[2], ret;
+    int to_child[2], from_child[2], ret, before;
 
     printf("a pipe to the parent that is full:\n");
     if (pipe(to_child) < 0 || pipe(from_child) < 0) {
@@ -547,16 +561,20 @@ static void test_full_pipe(void)
     fcntl(from_child[1], F_SETFL, O_NONBLOCK);
     while (write(from_child[1], filler, sizeof(filler)) > 0)
         ;
-    av_dict_set_int(&options, "ffstreamer_read_fd", to_child[0], 0);
-    av_dict_set_int(&options, "ffstreamer_write_fd", from_child[1], 0);
+    av_dict_set_int(&options, "read_fd", to_child[0], 0);
+    av_dict_set_int(&options, "write_fd", from_child[1], 0);
+    before = open_count();
     ret = avio_open2(&pb, "ffstreamer:", AVIO_FLAG_READ, &interrupt, &options);
     printf("open interrupted: %s\n", yes(ret == AVERROR_EXIT));
-    printf("its descriptors closed: %s\n",
-           yes(is_closed(to_child[0]) && is_closed(from_child[1])));
+    printf("its descriptors left open, and none of its own: %s\n",
+           yes(is_open(to_child[0]) && is_open(from_child[1]) &&
+               open_count() == before));
     avio_closep(&pb);
     av_dict_free(&options);
-    close(to_child[1]);
-    close(from_child[0]);
+    for (int i = 0; i < 2; i++) {
+        close(to_child[i]);
+        close(from_child[i]);
+    }
 }
 
 static void test_one_session_a_pipe(const uint8_t *file, uint8_t *buffer)
@@ -575,8 +593,8 @@ static void test_one_session_a_pipe(const uint8_t *file, uint8_t *buffer)
     printf("first open: %d\n", ret);
     read_copy  = dup(s.child_read);
     write_copy = dup(s.child_write);
-    av_dict_set_int(&options, "ffstreamer_read_fd", read_copy, 0);
-    av_dict_set_int(&options, "ffstreamer_write_fd", write_copy, 0);
+    av_dict_set_int(&options, "read_fd", read_copy, 0);
+    av_dict_set_int(&options, "write_fd", write_copy, 0);
     ret = avio_open2(&second, "ffstreamer:", AVIO_FLAG_READ, NULL, &options);
     printf("second open refused: %s\n", yes(ret == AVERROR(EBUSY)));
     printf("its descriptors left open: %s\n",
@@ -590,8 +608,8 @@ static void test_one_session_a_pipe(const uint8_t *file, uint8_t *buffer)
         return;
     }
     write_copy = dup(s.child_write);
-    av_dict_set_int(&options, "ffstreamer_read_fd", fresh[0], 0);
-    av_dict_set_int(&options, "ffstreamer_write_fd", write_copy, 0);
+    av_dict_set_int(&options, "read_fd", fresh[0], 0);
+    av_dict_set_int(&options, "write_fd", write_copy, 0);
     ret = avio_open2(&second, "ffstreamer:", AVIO_FLAG_READ, NULL, &options);
     printf("an open sharing only its write pipe refused: %s\n",
            yes(ret == AVERROR(EBUSY)));
@@ -617,6 +635,9 @@ int main(void)
     for (int i = 0; i < FILE_SIZE; i++)
         file[i] = (i * 7) ^ (i >> 8);
     av_log_set_level(AV_LOG_QUIET);
+    /* As every program using the protocol must, as ffmpeg and ffprobe do:
+     * a write to a pipe whose reader has gone fails instead. */
+    signal(SIGPIPE, SIG_IGN);
     /* A protocol that waits through its interrupt, or for a parent that
      * left, waits for ever: a minute ends the test instead. */
     alarm(60);
@@ -629,8 +650,6 @@ int main(void)
                      MISNUMBERS, 3);
     test_misbehaving(file, buffer, "the parent stalls at once",
                      STALLS, 0);
-    /* SIGPIPE at its default, which ends the process: the protocol must
-     * consume it, whatever the program's disposition. */
     test_misbehaving(file, buffer, "the parent stops reading after 3 answers",
                      STOPS_READING, 3);
     /* Its first: the protocol is certainly waiting for it when the

@@ -139,15 +139,13 @@ Docker, fails on any warning in the series' files, builds the protocols manual, 
 `fate-ffstreamer`: `src/libavformat/tests/ffstreamer.c`, which serves a file from a thread over two
 pipes and reads it through the public avio API, against `src/tests/ref/fate/ffstreamer`. It reads
 through, by seeks and at random through a cache of two blocks; meets a parent that leaves, stalls
-(ended by the interrupt), misnumbers a `DATA` (the fault sticks) or stops reading (SIGPIPE at its
-default) or sends a `DATA` a byte at a time (the interrupt is seen between bytes); waits for room in
-a full request pipe until interrupted; and checks the descriptors: made blocking, closed after a
-session and an open that fails once they are claimed, left open by an open refused for them (no
-pipe, the wrong way round, one descriptor for both, stdin) and by an `EBUSY`, including one that
-shares only a live session's write pipe, which reads on. Each of these faults injected into the
-protocol fails it: LRU eviction made MRU, the sticky fault, the interrupt check, the sequence check
-or the SIGPIPE mask removed, a refused open's descriptors kept, `O_NONBLOCK` kept; and the old
-protocol fails the byte-at-a-time, full-pipe, refusal and write-pipe cases.
+(ended by the interrupt), misnumbers a `DATA` (the fault sticks), stops reading (`EPIPE`, SIGPIPE
+ignored as the program must) or sends a `DATA` a byte at a time (the interrupt is seen between
+bytes); waits for room in a full request pipe until interrupted; and checks the descriptors: the
+caller's left open with their flags as given (non-blocking ones too) after a session, a failure and
+any refusal (no pipe, the wrong way round, one descriptor for both, stdin, an `EBUSY`, including one
+sharing only a live session's write pipe, which reads on), and none of the protocol's own
+duplicates left open.
 
 Media servers that burn subtitles in (`-vf subtitles=f=...`) or use `movie=` open those files by
 name, outside any whitelist: such a run needs a path to the subtitle file, or the file extracted

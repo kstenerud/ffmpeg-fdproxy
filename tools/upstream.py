@@ -41,8 +41,18 @@ def replace(tree, path, old, new):
 
 
 def copy(tree, source, path):
+    """Copies source into the tree, without what is between the markers "ffmpeg-ffstreamer only:" and
+    "ffmpeg-ffstreamer only: end.", which serves only this repository's users."""
     os.makedirs(os.path.dirname(os.path.join(tree, path)), exist_ok=True)
-    shutil.copyfile(os.path.join(HERE, source), os.path.join(tree, path))
+    kept, skipping = [], False
+    for line in read(source).splitlines(keepends=True):
+        if "ffmpeg-ffstreamer only:" in line:
+            skipping = not line.rstrip().endswith("end. */")
+            continue
+        if not skipping:
+            kept.append(line)
+    with open(os.path.join(tree, path), "w", encoding="utf-8") as f:
+        f.write("".join(kept))
 
 
 def read(path):
@@ -56,10 +66,8 @@ def protocol(tree):
            "extern const URLProtocol ff_ffstreamer_protocol;\n")
     insert(tree, "libavformat/Makefile", "OBJS-$(CONFIG_FFRTMPHTTP_PROTOCOL)       += rtmphttp.o\n",
            "OBJS-$(CONFIG_FFSTREAMER_PROTOCOL)       += ffstreamer.o\n")
-    insert(tree, "configure", "\n    siglongjmp\n", "    sigtimedwait\n")
     insert(tree, "configure", 'ffrtmphttp_protocol_select="http_protocol"\n',
-           'ffstreamer_protocol_deps="poll_h pthreads sigtimedwait"\n')
-    insert(tree, "configure", "check_func  setrlimit\n", "check_func_headers signal.h sigtimedwait\n")
+           'ffstreamer_protocol_deps="poll_h"\n')
     insert(tree, "doc/protocols.texi", "@section file\n", read("upstream/protocols.texi"), before=True)
     insert(tree, "Changelog", "version <next>:\n", "- ffstreamer protocol\n")
     version = os.path.join(tree, "libavformat/version.h")
@@ -140,6 +148,11 @@ def signal_exit(tree):
 
 
 def probe(tree):
+    insert(tree, "fftools/ffprobe.c", "#include <math.h>\n", "#include <signal.h>\n")
+    insert(tree, "fftools/ffprobe.c", "    init_dynload();\n\n",
+           "#ifdef SIGPIPE\n"
+           "    signal(SIGPIPE, SIG_IGN); /* a write to a closed pipe fails, as in ffmpeg */\n"
+           "#endif\n\n")
     replace(tree, "fftools/ffprobe.c",
             "end:\n    if (ifile.fmt_ctx)\n        close_input_file(&ifile);\n",
             "end:\n"
@@ -174,9 +187,12 @@ before use; FFmpeg's side trusts the parent, and the parent trusts
 nothing FFmpeg sends. Its specification:
 https://github.com/kstenerud/ffmpeg-ffstreamer
 
-It needs poll(), pthreads and sigtimedwait(), so it is built on Linux
-and the BSDs that have it, not on macOS or OpenBSD, which lack
-sigtimedwait().
+Like fd:, it works on duplicates of the descriptors it is given and
+never closes or changes the caller's. It starts no thread and touches no
+signal: a parent that has gone raises SIGPIPE, as for any pipe FFmpeg
+writes, which the program ignores. Its default whitelist is itself, so a
+demuxer's nested open cannot name the channel's descriptors through
+pipe: or fd:. It needs only poll().
 """),
     (fate, """fate/libavformat: add a test of the ffstreamer protocol
 
@@ -217,6 +233,9 @@ killed run looked like a successful one.
 
 As in ffmpeg: a read error left in the input's AVIOContext was taken as
 the input ending, and ffprobe printed partial results and exited 0.
+
+It also ignores SIGPIPE, as ffmpeg does, so a write to a pipe whose
+reader has gone fails with EPIPE rather than killing the process.
 """),
 ]
 

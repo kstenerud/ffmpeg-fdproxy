@@ -128,7 +128,10 @@ Checked against jellyfin-ffmpeg's source and its pinned binaries (see
 * **FFmpeg strips `AVSEEK_FORCE`** before calling a protocol's seek.
 * **ffmpeg's signal handlers restart interrupted calls,** so a blocked read ignores the interrupt
   callback unless the protocol polls and checks it.
-* **ffmpeg already ignores SIGPIPE;** ffprobe doesn't, which is why a frame's write guards it.
+* **ffmpeg already ignores SIGPIPE;** ffprobe didn't, and the patches make it, so the protocol
+  touches no signal: until 2026-10-24 a frame's write blocked SIGPIPE and consumed it with
+  `sigtimedwait`, which kept the protocol off macOS and OpenBSD and is what FFmpeg's reviewers would
+  object to in library code (UPSTREAMING.md).
 
 
 
@@ -142,7 +145,7 @@ Two patches, after jellyfin-ffmpeg's own series (`debian/patches/series`, applie
 | File                                                  | What                                            |
 | ----------------------------------------------------- | ----------------------------------------------- |
 | `libavformat/ffstreamer.c` (new; from `src/`)         | the protocol                                    |
-| `libavformat/protocols.c`, `Makefile`, `configure`    | one line each, registering it; `configure`'s `ffstreamer_protocol_deps` (`poll_h pthreads sigtimedwait`) drops it on builds without them: win64, macOS and OpenBSD |
+| `libavformat/protocols.c`, `Makefile`, `configure`    | one line each, registering it; `configure`'s `ffstreamer_protocol_deps` (`poll_h`) drops it on builds without `poll()`: win64 |
 | `libavformat/seek.c`                                  | one name added to the protocols FFmpeg treats as local ([The Block Cache](#the-block-cache)) |
 | `fftools/ffmpeg_demux.c`, `ffmpeg.c`, `ffprobe.c`     | the exit status of a failed read, about 15 lines |
 

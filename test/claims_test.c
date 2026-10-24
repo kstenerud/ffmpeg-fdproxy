@@ -106,10 +106,10 @@ static int open_session(Session *s)
     }
     c->class = &ffstreamer_class;
     av_opt_set_defaults(c);
-    c->read_fd  = s->ffmpeg_read;
-    c->write_fd = s->ffmpeg_write;
+    c->read_fd_option  = s->ffmpeg_read;
+    c->write_fd_option = s->ffmpeg_write;
     s->h->priv_data = c;
-    return ffstreamer_init(s->h, "ffstreamer:", AVIO_FLAG_READ);
+    return ffstreamer_open(s->h, "ffstreamer:", AVIO_FLAG_READ);
 }
 
 static void free_session(Session *s)
@@ -145,12 +145,14 @@ static void test_open_pipe_refused(void)
     close(second.ffmpeg_write);
     free_session(&second);
 
-    ffstreamer_close_all(first.h);
+    ffstreamer_close(first.h);
+    close(first.ffmpeg_read);
+    close(first.ffmpeg_write);
     free_session(&first);
 }
 
 /* Each session's descriptor number goes to the next one's new pipes, as the kernel hands out the
- * lowest free number, and every one opens. */
+ * lowest free number, once the caller has closed the last session's, and every one opens. */
 static void test_numbers_reused(void)
 {
     int opened = 0, reused = 0, first_read_fd = -1;
@@ -166,11 +168,10 @@ static void test_numbers_reused(void)
             reused++;
         if (open_session(&s) >= 0) {
             opened++;
-            ffstreamer_close_all(s.h);
-        } else {
-            close(s.ffmpeg_read);
-            close(s.ffmpeg_write);
+            ffstreamer_close(s.h);
         }
+        close(s.ffmpeg_read);
+        close(s.ffmpeg_write);
         free_session(&s);
     }
     expect(reused == SESSIONS - 1, "each new pipe takes the closed session's descriptor number");
