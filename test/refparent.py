@@ -127,6 +127,15 @@ class Parent:
         if lowest < 1 or highest < lowest or min(highest, mine[1]) < max(lowest, mine[0]):
             raise Violation(f"no shared version: the child {lowest}-{highest}, the parent {mine[0]}-{mine[1]}")
         version = min(highest, mine[1])
+        if self.args.signal_at_hello:
+            # FFmpeg has installed its signal handlers before it opens an input: the signal reaches
+            # them, not the default action, and the protocol waits for this HELLO, interruptibly.
+            self.child.send_signal(self.args.signal)
+            try:
+                self.child.wait(timeout=10)
+                return
+            except subprocess.TimeoutExpired:
+                pass
         self.write(self.frame(HELLO, 0, struct.pack("<hh", *mine)))
         got = self.next_frame()
         if got is None:
@@ -234,8 +243,10 @@ class Parent:
         if self.args.kill_after_ms:
             threading.Timer(self.args.kill_after_ms / 1000, self.child.kill).start()
         if self.args.signal_after_ms:
-            threading.Timer(self.args.signal_after_ms / 1000,
-                            lambda: self.child.send_signal(self.args.signal)).start()
+            # ffmpeg's interrupt fires on the second signal once its run has begun, so --signals 2.
+            for count in range(self.args.signals):
+                threading.Timer(self.args.signal_after_ms / 1000 + count * 0.3,
+                                lambda: self.child.send_signal(self.args.signal)).start()
         try:
             self.opening()
         except Violation as violation:
@@ -303,6 +314,8 @@ def main():
     parser.add_argument("--kill-after-ms", type=int)
     parser.add_argument("--signal-after-ms", type=int)
     parser.add_argument("--signal", type=int, default=15)
+    parser.add_argument("--signals", type=int, default=1, help="how many signals --signal-after-ms sends")
+    parser.add_argument("--signal-at-hello", action="store_true", help="signal once FFmpeg's HELLO arrives")
     parser.add_argument("--capture", action="store_true", help="hash the child's stdout")
     parser.add_argument("--trace", help="write each READ answered to this file: offset and length, a line each")
     parser.add_argument("command", nargs=argparse.REMAINDER)

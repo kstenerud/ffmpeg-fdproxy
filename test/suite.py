@@ -106,12 +106,13 @@ class Suite:
         case("the parent stalls and kills: no DONE, non-zero exit", killed_without_done,
              "--stall-after", "5", "--kill-after-ms", "3000")
         case("over its budget: killed", killed_without_done, "--budget", str(50 << 20))
-        case("a signal while the parent holds a read: non-zero exit", lambda r: (
-            r.get("exit") not in (0, None) and not r.get("succeeded"), json.dumps(r)[:600]),
-             "--stall-after", "5", "--signal-after-ms", "1500", "--kill-after-ms", "8000")
-        case("a signal during the opening exchange: non-zero exit", lambda r: (
-            r.get("exit") not in (0, None) and not r.get("succeeded"), json.dumps(r)[:600]),
-             "--signal-after-ms", "1", "--kill-after-ms", "8000")
+        # Exit 255 is ffmpeg's own, after a signal: the kill would be -9, the default action -15.
+        case("two signals while the parent holds a read: ffmpeg exits itself, 255", lambda r: (
+            r.get("exit") == 255 and not r.get("succeeded"), json.dumps(r)[:600]),
+             "--stall-after", "5", "--signal-after-ms", "1500", "--signals", "2", "--kill-after-ms", "8000")
+        case("a signal during the opening exchange: ffmpeg exits itself, 255", lambda r: (
+            r.get("exit") == 255 and not r.get("succeeded"), json.dumps(r)[:600]),
+             "--signal-at-hello", "--kill-after-ms", "8000")
 
     def report(self):
         failed = [r for r in self.results if not r[1]]
