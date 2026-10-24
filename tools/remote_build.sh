@@ -64,7 +64,8 @@ host=${target##* }
 options=${target%"$host"}
 # shellcheck disable=SC2086
 scp -q $options "$host:$kept/$tarball" "$out/"
-rm -rf "$out/bin-$arch" && mkdir -p "$out/bin-$arch"
+# The folder's contents are replaced, not the folder, which a container may have mounted.
+mkdir -p "$out/bin-$arch" && find "$out/bin-$arch" -mindepth 1 -delete
 tar -xJf "$out/$tarball" -C "$out/bin-$arch"
 echo "$commit" > "$out/bin-$arch/COMMIT"
 echo "fetched $out/$tarball; ffmpeg and ffprobe of $commit in $out/bin-$arch"
