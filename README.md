@@ -84,6 +84,11 @@ given.
 * Claims, under AddressSanitizer and UndefinedBehaviorSanitizer (`test/claims_test.c`): a second
   session on a pipe that is open already is refused, and a hundred sessions in turn, each on a new
   pipe at the descriptor number the last one closed, all open.
+* macOS 26 on Apple silicon (an M4, Apple clang 21, 2026-10-24): jellyfin-ffmpeg 8.1.2-5 with the
+  whole series builds natively, `poll.h` enabling the protocol, with no warning in `fdproxy.c`; the suite
+  passes all 27 cases at macOS's own pipe sizes, `fate-fdproxy` matches its reference, and the claims
+  test passes under AddressSanitizer and UndefinedBehaviorSanitizer. Not fuzzed there: Apple's clang
+  has no libFuzzer.
 * Byte-identical: a libx264 chunk encode, and an HLS fMP4 prepare (52 files).
 * Under a parent's confinement (Landlock and the seccomp filter of the specification's Launching)
   on amd64 and arm64: a threaded libx264 encode and ffprobe run normally, and starting a process,

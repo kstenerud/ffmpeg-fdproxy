@@ -11,7 +11,7 @@ import argparse, fcntl, json, os, select, struct, subprocess, sys, threading, ti
 
 HELLO, CAPABILITY, REQUEST, READ, DATA, DONE = 1, 2, 3, 4, 5, 6
 KINDS = {1: "TERMS", 2: "CHANNEL", 3: "PROTOCOL", 4: "INTERRUPTED"}
-F_SETPIPE_SZ = 1031
+F_SETPIPE_SZ = 1031 if sys.platform.startswith("linux") else None  # Linux's; others size pipes themselves
 
 
 class Violation(Exception):
@@ -38,9 +38,14 @@ class Parent:
 
     # --- channel ---------------------------------------------------------------
     def make_pipes(self):
-        # The parent's ends close-on-exec from creation; the child's ends handed by pass_fds.
-        self.child_read, self.parent_write = os.pipe2(os.O_CLOEXEC)
-        self.parent_read, self.child_write = os.pipe2(os.O_CLOEXEC)
+        # The parent's ends close-on-exec from creation; the child's ends handed by pass_fds. Where
+        # there is no pipe2 (macOS), os.pipe sets close-on-exec just after: not atomic, as the
+        # specification's Launching asks, but this parent starts nothing else meanwhile.
+        pipe = (lambda: os.pipe2(os.O_CLOEXEC)) if hasattr(os, "pipe2") else os.pipe
+        self.child_read, self.parent_write = pipe()
+        self.parent_read, self.child_write = pipe()
+        if F_SETPIPE_SZ is None:
+            return
         try:
             fcntl.fcntl(self.parent_write, F_SETPIPE_SZ, self.args.pipe_bytes)
         except OSError as error:
