@@ -36,9 +36,14 @@ build-arm64: ## Build the patched FFmpeg for linux/arm64 into OUT (default dist/
 	./build.sh arm64 $(OUT)
 
 .PHONY: remote-build
-remote-build: ## Build HEAD on HOST (an ssh target, e.g. "-i ~/.ssh/key user@host") for ARCH (default amd64) into OUT; the host keeps each commit's build, so a commit built once is fetched, not built again
-	@test -n '$(HOST)' || { echo "HOST is the ssh target to build on"; exit 2; }
+remote-build: ## Build HEAD on the cache machine HOST (an ssh target, e.g. "-i ~/.ssh/key user@host") for ARCH (default amd64) into OUT; it keeps each commit's build, so one built once is fetched, not built again
+	@test -n '$(HOST)' || { echo "HOST is the ssh target of the cache machine"; exit 2; }
 	tools/remote_build.sh "$(HOST)" $(ARCH) $(OUT)
+
+.PHONY: remote-media
+remote-media: ## remote-build, and the suite's films made on HOST with that build, kept there and fetched into MEDIA
+	@test -n '$(HOST)' || { echo "HOST is the ssh target of the cache machine"; exit 2; }
+	tools/remote_build.sh -m $(MEDIA) "$(HOST)" $(ARCH) $(OUT)
 
 .PHONY: media
 media: ## Make the suite's films into MEDIA (default media/) from FFmpeg's test sources, with BIN's ffmpeg

@@ -2,7 +2,7 @@
 # Builds this repository's committed HEAD on another machine, by build.sh there, and fetches the
 # tarball and its ffmpeg and ffprobe into OUT_DIR/bin-ARCH, as build.sh does locally.
 #
-#     tools/remote_build.sh [-f] SSH_TARGET ARCH OUT_DIR
+#     tools/remote_build.sh [-f] [-m MEDIA_DIR] SSH_TARGET ARCH OUT_DIR
 #
 # SSH_TARGET is what ssh takes ("-i key user@host" works, quoted as one argument); ARCH is amd64
 # or arm64. The host needs git, Docker and the network. Each build is kept on the host under
@@ -10,11 +10,22 @@
 # without building; -f builds it again. Only what is committed is built: a tree with uncommitted
 # changes to the patches, src/ or the build scripts is refused, since its build would carry the
 # commit's name and not be the commit.
+#
+# The host is the cache machine: it does the one-time heavy work, and other machines copy what it
+# made. With -m it also makes the suite's films there (test/make_media.py with that build's ffmpeg,
+# minutes of encoding), keeps them beside the build, and fetches them into MEDIA_DIR.
 set -eu
 force=0
-if [ "${1:-}" = -f ]; then force=1; shift; fi
+media=
+while :; do
+    case "${1:-}" in
+        -f) force=1; shift ;;
+        -m) media=$2; shift 2 ;;
+        *) break ;;
+    esac
+done
 if [ $# -ne 3 ] || { [ "$2" != amd64 ] && [ "$2" != arm64 ]; }; then
-    echo "usage: $0 [-f] SSH_TARGET amd64|arm64 OUT_DIR" >&2
+    echo "usage: $0 [-f] [-m MEDIA_DIR] SSH_TARGET amd64|arm64 OUT_DIR" >&2
     exit 2
 fi
 target=$1
@@ -57,3 +68,16 @@ rm -rf "$out/bin-$arch" && mkdir -p "$out/bin-$arch"
 tar -xJf "$out/$tarball" -C "$out/bin-$arch"
 echo "$commit" > "$out/bin-$arch/COMMIT"
 echo "fetched $out/$tarball; ffmpeg and ffprobe of $commit in $out/bin-$arch"
+
+if [ -n "$media" ]; then
+    # shellcheck disable=SC2086
+    if [ "$force" = 1 ] || ! ssh $target "test -f $kept/media/.made"; then
+        echo "making the suite's films on $target"
+        ssh $target "cd $kept && rm -rf media && python3 src/test/make_media.py --ffmpeg bin-$arch/ffmpeg media \
+            && touch media/.made"
+    fi
+    mkdir -p "$media"
+    # shellcheck disable=SC2086
+    scp -q $options "$host:$kept/media/*" "$media/"
+    echo "fetched the suite's films of $commit into $media"
+fi
