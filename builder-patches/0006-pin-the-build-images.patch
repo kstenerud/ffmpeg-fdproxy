@@ -1,0 +1,23 @@
+Pins the images the builder runs, by digest: buildx's builder ran moby/buildkit:buildx-stable-1,
+whichever release that tag named on the day (v0.33.1), and the local registry ran registry:2.
+
+diff --git a/builder/makeimage.sh b/builder/makeimage.sh
+index bbbd4cd3..c1c72cca 100755
+--- a/builder/makeimage.sh
++++ b/builder/makeimage.sh
+@@ -15,12 +15,14 @@ docker buildx inspect ffbuilder &>/dev/null || docker buildx create \
+     --name ffbuilder \
+     --config "$TMPCFG" \
+     --driver-opt network=host \
++    --driver-opt image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea \
+     --driver-opt env.BUILDKIT_STEP_LOG_MAX_SIZE=-1 \
+     --driver-opt env.BUILDKIT_STEP_LOG_MAX_SPEED=-1
+ 
+ if [[ -z "$QUICKBUILD" ]]; then
+     docker container inspect ffbuildreg &>/dev/null || \
+-        docker run --rm -d -p 127.0.0.1:0:5000 --name ffbuildreg registry:2
++        docker run --rm -d -p 127.0.0.1:0:5000 --name ffbuildreg \
++            registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+     LOCAL_REG_PORT="$(docker container inspect --format='{{range $p, $conf := .NetworkSettings.Ports}}{{(index $conf 0).HostPort}}{{end}}' ffbuildreg)"
+     LOCAL_ROOT="127.0.0.1:${LOCAL_REG_PORT}/local"
+     trap "rm -f '$TMPCFG'; docker container stop ffbuildreg" EXIT
