@@ -109,15 +109,34 @@ make upstream             # the series for FFmpeg's own tree, into build/upstrea
 make test-upstream        # the series built on FFmpeg master, its FATE test run, its manual built
 ```
 
-`checkout.sh` checks out jellyfin-ffmpeg at the tag in `JELLYFIN_TAG`, adds `patches/` after
+`checkout.sh` checks out jellyfin-ffmpeg at the tag in `JELLYFIN_TAG`, refusing it unless it is
+the commit in `JELLYFIN_COMMIT`, adds `patches/` after
 jellyfin's own `debian/patches/series`, and `build.sh` runs jellyfin's portable builder on it, which
 needs Docker. The first build makes its toolchain image, an hour or more; later builds take minutes,
 until the builder changes, when the image is made again.
 
-`builder-patches/` changes jellyfin's builder, which would take crosstool-NG's main branch, a
-mirror GNU's redirector picks at random, Ubuntu's image of the day and Implib.so's head, so that the
-toolchain is built from the same sources every time. Every download crosstool-NG makes is still
-checked against its digest (the kernel headers' aside, which jellyfin's builder drops).
+`builder-patches/` changes jellyfin's builder so that a build takes only sources named exactly and
+checked, the same every time. Unpatched, it would take crosstool-NG's main branch, a mirror GNU's
+redirector picks at random, the kernel headers unchecked, Ubuntu's image and archive of the day,
+rustup's stable of the day, a few libraries by tag (and fftw3 by its head), and the newest buildkit
+and registry images. Patched, it takes:
+
+| Input | Pinned to |
+| --- | --- |
+| jellyfin-ffmpeg | the tag in `JELLYFIN_TAG`, checked against the commit in `JELLYFIN_COMMIT` |
+| The base image | `ubuntu:resolute` by digest, the image of 2026-10-29 |
+| Its packages | Ubuntu's archive at 2026-10-29T00:00Z, from snapshot.ubuntu.com, checked by apt against the archive's signed index |
+| crosstool-NG | commit 185f3483, the version the config names |
+| The toolchain's packages (gcc, binutils, glibc, the kernel headers, …) | the versions the config names, each checked against crosstool-NG's sha512 of it; one with no digest is refused |
+| Implib.so | commit a3e167cf |
+| Rust | not installed: no library uses it |
+| Each library | a commit (libiconv, openssl, xz and Vulkan-Headers, which jellyfin names by tag, at the commits the tags name); lame by Subversion revision, its files checked against a digest |
+| Submodules, shaderc's dependencies | the commits the pinned sources record |
+| buildkit, the local registry | `moby/buildkit:v0.33.1` and `registry:2.8.3`, by digest |
+
+A new `JELLYFIN_TAG` needs the patches made again on its builder, with the pins of that day. The
+win64 image, which this repository does not build, is left as jellyfin has it, beyond the Rust it no
+longer gets from the base.
 
 `make media` writes the suite's films with the patched FFmpeg's own test sources
 (`test/make_media.py`): five minutes of 720p H.264, a 5.1 and a stereo track, subtitles and
@@ -174,10 +193,10 @@ first through this protocol.
 | [`DESIGN.md`](DESIGN.md) | Why the protocol is as it is: rationale, FFmpeg's internals, testing, measurements, open questions. |
 | [`fdproxy.dogma`](fdproxy.dogma) | The protocol's wire format, in [Dogma](https://github.com/kstenerud/dogma). |
 | [`patches/`](patches/) | The patches, appended to jellyfin-ffmpeg's own `debian/patches/series`. |
-| [`builder-patches/`](builder-patches/) | Changes to jellyfin-ffmpeg's builder, pinning the sources of its toolchain (above). |
+| [`builder-patches/`](builder-patches/) | Changes to jellyfin-ffmpeg's builder, so that every source its images take is pinned (above). |
 | [`src/`](src/) | The protocol's source, from which `patches/9000` is made, and its FATE test and reference. |
 | [`upstream/`](upstream/), [`UPSTREAM_COMMIT`](UPSTREAM_COMMIT) | The manual entry for FFmpeg's own tree, and the FFmpeg commit the series is made on. |
-| [`checkout.sh`](checkout.sh), [`build.sh`](build.sh), [`Makefile`](Makefile), [`JELLYFIN_TAG`](JELLYFIN_TAG) | Building the patched FFmpeg (above). |
+| [`checkout.sh`](checkout.sh), [`build.sh`](build.sh), [`Makefile`](Makefile), [`JELLYFIN_TAG`](JELLYFIN_TAG), [`JELLYFIN_COMMIT`](JELLYFIN_COMMIT) | Building the patched FFmpeg (above). |
 | [`fuzz/`](fuzz/) | The fuzz harness of FFmpeg's side, its build and its seeds. |
 | [`tools/`](tools/) | `check_patch.py`, `check_spec.py` and `sync_patch.py`; `upstream.sh` and `upstream.py`, which make the series for FFmpeg's own tree; and scripts for the development tree (`build_dev.sh`, and the edits it applies). |
 | [`.github/workflows/`](.github/workflows/) | CI and releases (below). |
