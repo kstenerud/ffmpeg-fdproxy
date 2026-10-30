@@ -186,8 +186,8 @@ first through this protocol.
   FFmpeg's own tree with its FATE test, the claims test, five minutes of fuzzing, then the build and the suite on amd64 and arm64, each on its own architecture. A build
   starts cold, about an hour, because jellyfin's toolchain cache is larger than an Actions cache.
 * **fuzz-weekly**: five hours of fuzzing every Sunday.
-* **release**, on a tag `v<jellyfin version>-<n>` (`v8.1.2-5-1` is the first release on
-  jellyfin-ffmpeg v8.1.2-5): the same build and suite, then a release holding
+* **release**, on a tag `v<jellyfin version>-<n>` (`v8.1.3-1-1` is the first release on
+  jellyfin-ffmpeg v8.1.3-1): the same build and suite, then a release holding
   `ffmpeg-fdproxy_<version>_linux64-gpl.tar.xz`, `…_linuxarm64-gpl.tar.xz` and `SHA256SUMS`. The
   tarballs are laid out as jellyfin's portable ones, `ffmpeg` and `ffprobe` at the root.
 

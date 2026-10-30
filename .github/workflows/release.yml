@@ -1,4 +1,4 @@
-# On a tag v<jellyfin version>-<n> (v8.1.2-5-1: jellyfin-ffmpeg v8.1.2-5, these patches' first release on
+# On a tag v<jellyfin version>-<n> (v8.1.3-1-1: jellyfin-ffmpeg v8.1.3-1, these patches' first release on
 # it): build both architectures, run the suite on each, and publish the two tarballs with their SHA-256
 # sums. The tarballs hold ffmpeg and ffprobe at their root, as jellyfin's portable ones do.
 name: release
@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: The tag names the pinned jellyfin-ffmpeg
         run: |
-          # Exactly <jellyfin tag>-<n>, n from 1 without leading zeros: not v8.1.2-50-1, nor v8.1.2-5-1x.
+          # Exactly <jellyfin tag>-<n>, n from 1 without leading zeros: not v8.1.3-10-1, nor v8.1.3-1-1x.
           n=${GITHUB_REF_NAME#"$(cat JELLYFIN_TAG)"-}
           case "$n" in
             "$GITHUB_REF_NAME" | "" | 0* | *[!0-9]*)
