@@ -1,0 +1,41 @@
+Checks every package the toolchain downloads against crosstool-NG's digest of it, the kernel's
+included.
+
+* The Linux kernel headers, 4.18.20 in the ct-ng-config: jellyfin's builder deleted
+  crosstool-NG's digests of every kernel (packages/linux/*/chksum), so the kernel tarball was
+  taken as served. crosstool-NG 185f3483's digests of linux-4.18.20 are kept; their sha256s are the
+  ones in kernel.org's v4.x/sha256sums.asc, signed by its checksum autosigner
+  (B8868C80BA62A1FFFAF5FDA9632D3A06589DA6B1).
+* A package with no digest, or a file with none in its package's list, is refused: crosstool-NG
+  only warned and used it. Every package and version the two configs name has one.
+
+diff --git a/builder/images/base-linux64/Dockerfile b/builder/images/base-linux64/Dockerfile
+index 72ea22ea..39a9e293 100644
+--- a/builder/images/base-linux64/Dockerfile
++++ b/builder/images/base-linux64/Dockerfile
+@@ -5,7 +5,9 @@ RUN --mount=src=ct-ng-config,dst=/.config \
+     git clone --filter=blob:none https://github.com/crosstool-ng/crosstool-ng.git /ct-ng && cd /ct-ng && \
+     git checkout 185f3483e0e5028357b131fb97c4331551a70a1e && \
+     sed -i '/ftpmirror\.gnu\.org/d' scripts/functions && ! grep -q ftpmirror scripts/functions && \
+-    rm -rf packages/linux/*/chksum && \
++    sed -i -e '/digest missing"/{n;s/return 0/return 1/}' \
++        -e '/reference digest not available"/{n;s/return 0/return 1/}' scripts/functions && \
++    test "$(grep -A1 -e 'digest missing"' -e 'reference digest not available"' scripts/functions | grep -c 'return 1')" = 2 && \
+     ./bootstrap && \
+     ./configure --enable-local && \
+     make -j$(nproc) && \
+diff --git a/builder/images/base-linuxarm64/Dockerfile b/builder/images/base-linuxarm64/Dockerfile
+index 0368a393..7db4d751 100644
+--- a/builder/images/base-linuxarm64/Dockerfile
++++ b/builder/images/base-linuxarm64/Dockerfile
+@@ -5,7 +5,9 @@ RUN --mount=src=ct-ng-config,dst=/.config \
+     git clone --filter=blob:none https://github.com/crosstool-ng/crosstool-ng.git /ct-ng && cd /ct-ng && \
+     git checkout 185f3483e0e5028357b131fb97c4331551a70a1e && \
+     sed -i '/ftpmirror\.gnu\.org/d' scripts/functions && ! grep -q ftpmirror scripts/functions && \
+-    rm -rf packages/linux/*/chksum && \
++    sed -i -e '/digest missing"/{n;s/return 0/return 1/}' \
++        -e '/reference digest not available"/{n;s/return 0/return 1/}' scripts/functions && \
++    test "$(grep -A1 -e 'digest missing"' -e 'reference digest not available"' scripts/functions | grep -c 'return 1')" = 2 && \
+     ./bootstrap && \
+     ./configure --enable-local && \
+     make -j$(nproc) && \
