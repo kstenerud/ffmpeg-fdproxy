@@ -1,0 +1,68 @@
+Pins what jellyfin's builder takes from the day of the build, for the toolchain images.
+
+* crosstool-NG at 185f3483 (1.28.0-23), the version its ct-ng-config names (CT_VERSION
+  "1.28.0.23_185f348"). The builder cloned its main, which no longer has the config's gcc 15.2.0
+  and binutils 2.46.0: those were then fetched with no digest to check and none of their bundled
+  patches, since ct-ng build reads the .config as written.
+* GNU packages from ftp.gnu.org, GNU's own server: CT_Mirrors no longer offers ftpmirror.gnu.org,
+  which redirects to a mirror picked at random, and one served an ncurses-6.5.tar.gz whose
+  sha512 was not the release's (2026-10-30; the digest check refused it).
+* ubuntu:resolute by digest, the image of 2026-10-29.
+* Implib.so at a3e167cf, its head since 2026-08-01, instead of its head on the day.
+
+diff --git a/builder/images/base-linux64/Dockerfile b/builder/images/base-linux64/Dockerfile
+index 0af1d29e..72ea22ea 100644
+--- a/builder/images/base-linux64/Dockerfile
++++ b/builder/images/base-linux64/Dockerfile
+@@ -3,6 +3,8 @@ FROM $GH_REPO/base:latest
+ 
+ RUN --mount=src=ct-ng-config,dst=/.config \
+     git clone --filter=blob:none https://github.com/crosstool-ng/crosstool-ng.git /ct-ng && cd /ct-ng && \
++    git checkout 185f3483e0e5028357b131fb97c4331551a70a1e && \
++    sed -i '/ftpmirror\.gnu\.org/d' scripts/functions && ! grep -q ftpmirror scripts/functions && \
+     rm -rf packages/linux/*/chksum && \
+     ./bootstrap && \
+     ./configure --enable-local && \
+@@ -38,7 +40,8 @@ ADD toolchain.cmake /toolchain.cmake
+ ADD cross.meson /cross.meson
+ 
+ ADD gen-implib.sh /usr/bin/gen-implib
+-RUN git clone --filter=blob:none --depth=1 https://github.com/yugr/Implib.so /opt/implib
++RUN git clone --filter=blob:none https://github.com/yugr/Implib.so /opt/implib && \
++    git -C /opt/implib checkout a3e167cf978a5b8a38ec0f710d8c4331e8dcdd9a
+ 
+ ENV FFBUILD_TOOLCHAIN=x86_64-ffbuild-linux-gnu
+ ENV PATH="/opt/ct-ng/bin:${PATH}" \
+diff --git a/builder/images/base-linuxarm64/Dockerfile b/builder/images/base-linuxarm64/Dockerfile
+index f3114954..0368a393 100644
+--- a/builder/images/base-linuxarm64/Dockerfile
++++ b/builder/images/base-linuxarm64/Dockerfile
+@@ -3,6 +3,8 @@ FROM $GH_REPO/base:latest
+ 
+ RUN --mount=src=ct-ng-config,dst=/.config \
+     git clone --filter=blob:none https://github.com/crosstool-ng/crosstool-ng.git /ct-ng && cd /ct-ng && \
++    git checkout 185f3483e0e5028357b131fb97c4331551a70a1e && \
++    sed -i '/ftpmirror\.gnu\.org/d' scripts/functions && ! grep -q ftpmirror scripts/functions && \
+     rm -rf packages/linux/*/chksum && \
+     ./bootstrap && \
+     ./configure --enable-local && \
+@@ -40,7 +42,8 @@ ADD toolchain.cmake /toolchain.cmake
+ ADD cross.meson /cross.meson
+ 
+ ADD gen-implib.sh /usr/bin/gen-implib
+-RUN git clone --filter=blob:none --depth=1 https://github.com/yugr/Implib.so /opt/implib
++RUN git clone --filter=blob:none https://github.com/yugr/Implib.so /opt/implib && \
++    git -C /opt/implib checkout a3e167cf978a5b8a38ec0f710d8c4331e8dcdd9a
+ 
+ ENV FFBUILD_TOOLCHAIN=aarch64-ffbuild-linux-gnu
+ ENV PATH="/opt/ct-ng/bin:${PATH}" \
+diff --git a/builder/images/base/Dockerfile b/builder/images/base/Dockerfile
+index 9a4ac3b5..a72a8d9f 100644
+--- a/builder/images/base/Dockerfile
++++ b/builder/images/base/Dockerfile
+@@ -1,4 +1,4 @@
+-FROM ubuntu:resolute
++FROM ubuntu:resolute@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c
+ 
+ ENV DEBIAN_FRONTEND=noninteractive
+ 

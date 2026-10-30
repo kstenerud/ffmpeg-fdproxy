@@ -34,7 +34,7 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 mkdir -p "$3"
 out=$(cd "$3" && pwd)
 cd "$here"
-if [ -n "$(git status --porcelain -- patches src build.sh checkout.sh JELLYFIN_TAG)" ]; then
+if [ -n "$(git status --porcelain -- patches builder-patches src build.sh checkout.sh JELLYFIN_TAG)" ]; then
     echo "uncommitted changes to what a build reads; commit them first" >&2
     exit 1
 fi

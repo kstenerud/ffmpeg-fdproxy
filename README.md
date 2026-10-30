@@ -111,7 +111,13 @@ make test-upstream        # the series built on FFmpeg master, its FATE test run
 
 `checkout.sh` checks out jellyfin-ffmpeg at the tag in `JELLYFIN_TAG`, adds `patches/` after
 jellyfin's own `debian/patches/series`, and `build.sh` runs jellyfin's portable builder on it, which
-needs Docker. The first build makes its toolchain image, an hour or more; later builds take minutes.
+needs Docker. The first build makes its toolchain image, an hour or more; later builds take minutes,
+until the builder changes, when the image is made again.
+
+`builder-patches/` changes jellyfin's builder, which would take crosstool-NG's main branch, a
+mirror GNU's redirector picks at random, Ubuntu's image of the day and Implib.so's head, so that the
+toolchain is built from the same sources every time. Every download crosstool-NG makes is still
+checked against its digest (the kernel headers' aside, which jellyfin's builder drops).
 
 `make media` writes the suite's films with the patched FFmpeg's own test sources
 (`test/make_media.py`): five minutes of 720p H.264, a 5.1 and a stereo track, subtitles and
@@ -168,6 +174,7 @@ first through this protocol.
 | [`DESIGN.md`](DESIGN.md) | Why the protocol is as it is: rationale, FFmpeg's internals, testing, measurements, open questions. |
 | [`fdproxy.dogma`](fdproxy.dogma) | The protocol's wire format, in [Dogma](https://github.com/kstenerud/dogma). |
 | [`patches/`](patches/) | The patches, appended to jellyfin-ffmpeg's own `debian/patches/series`. |
+| [`builder-patches/`](builder-patches/) | Changes to jellyfin-ffmpeg's builder, pinning the sources of its toolchain (above). |
 | [`src/`](src/) | The protocol's source, from which `patches/9000` is made, and its FATE test and reference. |
 | [`upstream/`](upstream/), [`UPSTREAM_COMMIT`](UPSTREAM_COMMIT) | The manual entry for FFmpeg's own tree, and the FFmpeg commit the series is made on. |
 | [`checkout.sh`](checkout.sh), [`build.sh`](build.sh), [`Makefile`](Makefile), [`JELLYFIN_TAG`](JELLYFIN_TAG) | Building the patched FFmpeg (above). |
