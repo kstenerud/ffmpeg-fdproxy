@@ -30,6 +30,10 @@ builder=$({ git rev-parse HEAD:builder; git diff HEAD -- builder; } | sha256sum 
 if ! docker image inspect "$image:builder-$builder" > /dev/null 2>&1; then
     docker image ls --format '{{.Repository}}:{{.Tag}}' "$image" | xargs -r docker image rm
 fi
+# jellyfin's makeimage.sh pushes the toolchain images to a registry of its own, and builds on them by
+# digest. buildx's default provenance attestation, made fresh each build, changes that digest, and so
+# the toolchain built on it would never be found in the build cache (CI keeps that cache, build.yml).
+export BUILDX_NO_DEFAULT_ATTESTATIONS=1
 ./build-linux-"$arch" "$out"
 docker tag "$image:latest" "$image:builder-$builder"
 tarball=$(ls -t "$out"/jellyfin-ffmpeg_*_portable_"$name"-gpl.tar.xz | head -1)

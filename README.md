@@ -190,8 +190,12 @@ first through this protocol.
 `.github/workflows/`:
 
 * **ci**, on every pull request and push to main: the patch and grammar checks, the series on
-  FFmpeg's own tree with its FATE test, the claims test, five minutes of fuzzing, then the build and the suite on amd64 and arm64, each on its own architecture. A build
-  starts cold, about an hour, because jellyfin's toolchain cache is larger than an Actions cache.
+  FFmpeg's own tree with its FATE test, the claims test, five minutes of fuzzing, then the build and the suite on amd64 and arm64, each on its own architecture. The
+  toolchain images' build cache is kept in the Actions cache under a key of the builder files that
+  make them (1.9 GB per architecture), so the toolchain is built only when those change; the
+  libraries' image, 5 GB per architecture, is too large for the Actions cache and is made each run.
+  A tag's run restores the cache main's run saved, so a release reuses the toolchain once main has
+  built it, unless GitHub has evicted it (a week unused).
 * **fuzz-weekly**: five hours of fuzzing every Sunday.
 * **release**, on a tag `v<jellyfin version>-<n>` (`v8.1.3-1-1` is the first release on
   jellyfin-ffmpeg v8.1.3-1): the same build and suite, then a release holding

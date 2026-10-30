@@ -1,6 +1,7 @@
 # Builds the patched FFmpeg for one architecture and runs the suite on it, on that architecture.
-# ci.yml and release.yml call it. A build starts cold: jellyfin's toolchain image takes about an hour
-# (its cache, 7 GB per architecture, is larger than a repository's Actions cache).
+# ci.yml and release.yml call it. The toolchain images' cache is kept between runs while the builder
+# files that make them are unchanged; the libraries' image (5 GB per architecture, too large for a
+# repository's Actions cache) is made each run.
 name: build
 
 on:
@@ -26,6 +27,19 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           docker system prune --all --force
           df -h /
+      - name: Check out jellyfin-ffmpeg
+        run: ./checkout.sh
+      # jellyfin's builder keeps buildx's cache of each image it makes in builder/.cache. The
+      # toolchain's two, base and base-<target>, take an hour to make and are kept between runs,
+      # under a key of the builder files that make them; the libraries' image is too large for the
+      # repository's Actions cache and is made each run. A tag's run restores what main's saved.
+      - name: The toolchain images' cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            build/jellyfin-ffmpeg/builder/.cache/*/*/*/base_latest
+            build/jellyfin-ffmpeg/builder/.cache/*/*/*/base-*_latest
+          key: toolchain-${{ inputs.arch }}-${{ hashFiles('build/jellyfin-ffmpeg/builder/images/base/**', format('build/jellyfin-ffmpeg/builder/images/base-{0}/**', inputs.arch == 'arm64' && 'linuxarm64' || 'linux64')) }}
       - name: Build
         run: make build-${{ inputs.arch }} OUT=dist
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
