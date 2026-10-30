@@ -1,0 +1,31 @@
+Installs the base image's packages from Ubuntu's archive as it stood at 2026-10-29T00:00Z, the day
+of the pinned ubuntu:resolute image, through snapshot.ubuntu.com: apt-get update and dist-upgrade
+took the archive of the day of the build. arm64 is in the same archive since 26.04, so the one source
+serves either machine. An index that fails to download fails the update (--error-on=any): apt
+otherwise went on with the indices it had.
+
+diff --git a/builder/images/base/Dockerfile b/builder/images/base/Dockerfile
+index a72a8d9f..46b93eac 100644
+--- a/builder/images/base/Dockerfile
++++ b/builder/images/base/Dockerfile
+@@ -2,8 +2,19 @@ FROM ubuntu:resolute@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44
+ 
+ ENV DEBIAN_FRONTEND=noninteractive
+ 
++# Ubuntu's archive as it stood at 2026-10-29T00:00Z, from its snapshot service, so every build
++# installs the same packages. It is served over https only, and the image has no certificates, so
++# the first update and the certificates' install skip the peer check; apt still checks the
++# archive's signed index, and each file against its hash there.
+ RUN \
+-    apt-get -y update && \
++    printf '%s\n' 'Types: deb' 'URIs: https://snapshot.ubuntu.com/ubuntu/20261029T000000Z/' \
++        'Suites: resolute resolute-updates resolute-backports resolute-security' \
++        'Components: main universe restricted multiverse' \
++        'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
++        > /etc/apt/sources.list.d/ubuntu.sources && \
++    apt-get -y -o Acquire::https::Verify-Peer=false update --error-on=any && \
++    apt-get -y -o Acquire::https::Verify-Peer=false install --no-install-recommends ca-certificates && \
++    apt-get -y update --error-on=any && \
+     apt-get -y dist-upgrade && \
+     apt-get -y install --no-install-recommends \
+         build-essential yasm nasm quilt \
