@@ -1,0 +1,44 @@
+Takes Rust out of the images: the base installed rustup's stable of the day (curl | sh) and the
+newest cargo-c, and the arm64 and win64 images added a Rust target, but no library script builds
+anything with Rust. win64's line goes with them, since its image is built on the same base.
+
+diff --git a/builder/images/base-linuxarm64/Dockerfile b/builder/images/base-linuxarm64/Dockerfile
+index 7db4d751..98dc005d 100644
+--- a/builder/images/base-linuxarm64/Dockerfile
++++ b/builder/images/base-linuxarm64/Dockerfile
+@@ -38,8 +38,6 @@ RUN \
+         -delete && \
+     mkdir /opt/ffbuild
+ 
+-RUN rustup target add aarch64-unknown-linux-gnu
+-
+ ADD toolchain.cmake /toolchain.cmake
+ ADD cross.meson /cross.meson
+ 
+diff --git a/builder/images/base-win64/Dockerfile b/builder/images/base-win64/Dockerfile
+index c33d066b..796168ea 100644
+--- a/builder/images/base-win64/Dockerfile
++++ b/builder/images/base-win64/Dockerfile
+@@ -19,8 +19,6 @@ RUN \
+         -delete && \
+     mkdir /opt/ffbuild
+ 
+-RUN rustup target add x86_64-pc-windows-gnu
+-
+ ADD toolchain.cmake /toolchain.cmake
+ ADD cross.meson /cross.meson
+ 
+diff --git a/builder/images/base/Dockerfile b/builder/images/base/Dockerfile
+index 46b93eac..0c62bb83 100644
+--- a/builder/images/base/Dockerfile
++++ b/builder/images/base/Dockerfile
+@@ -31,9 +31,5 @@ RUN \
+     git config --global user.name "Builder" && \
+     git config --global advice.detachedHead false
+ 
+-ENV CARGO_HOME="/opt/cargo" RUSTUP_HOME="/opt/rustup" PATH="/opt/cargo/bin:${PATH}"
+-RUN curl https://sh.rustup.rs -sSf | bash -s -- -y --no-modify-path
+-RUN cargo install --locked cargo-c && rm -rf "${CARGO_HOME}"/registry "${CARGO_HOME}"/git
+-
+ RUN --mount=src=.,dst=/input \
+     for s in /input/*.sh; do cp $s /usr/bin/$(echo $s | sed -e 's|.*/||' -e 's/\.sh$//'); done
