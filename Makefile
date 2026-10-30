@@ -53,10 +53,13 @@ media: ## Make the suite's films into MEDIA (default media/) from FFmpeg's test 
 test: ## Run the suite against BIN (default dist/bin-amd64) with MEDIA (film.mkv, film-moov-at-end.mp4)
 	python3 test/suite.py --bin $(BIN) --media $(MEDIA)
 
+# The tests' Debian image, by digest (TEST_IMAGE; tools/debian_snapshot.sh pins its packages).
+TEST_IMAGE := $(shell cat TEST_IMAGE)
+
 .PHONY: test-claims
 test-claims: checkout ## Check that a pipe serves one session at a time and a closed one's descriptor serves the next
 	fuzz/build.sh build/jellyfin-ffmpeg build/fuzz
-	docker run --rm -v "$$PWD/build/fuzz":/work -w /work debian:trixie ./claims_test
+	docker run --rm -v "$$PWD/build/fuzz":/work -w /work $(TEST_IMAGE) ./claims_test
 
 .PHONY: upstream
 upstream: ## Make the series for FFmpeg's own tree, at UPSTREAM_COMMIT, into build/upstream/
@@ -70,7 +73,7 @@ test-upstream: ## Make the series, then build it and run its FATE test and the p
 fuzz: checkout ## Fuzz FFmpeg's side for FUZZ_SECONDS (default 600) on FUZZ_JOBS workers under ASan and UBSan, checking the specification's invariants
 	fuzz/build.sh build/jellyfin-ffmpeg build/fuzz
 	rm -rf build/fuzz/corpus && mkdir -p build/fuzz/corpus && cp fuzz/corpus/* build/fuzz/corpus/
-	docker run --rm -v "$$PWD/build/fuzz":/work -w /work debian:trixie \
+	docker run --rm -v "$$PWD/build/fuzz":/work -w /work $(TEST_IMAGE) \
 		./fdproxy_fuzzer -max_len=16384 -timeout=10 -max_total_time=$(FUZZ_SECONDS) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS) corpus
 	@! ls build/fuzz/crash-* build/fuzz/leak-* build/fuzz/timeout-* build/fuzz/oom-* 2>/dev/null
 

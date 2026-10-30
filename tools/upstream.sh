@@ -2,7 +2,7 @@
 # Checks out FFmpeg at the commit UPSTREAM_COMMIT names into build/ffmpeg-upstream, makes the two
 # series for FFmpeg's own tree there (tools/upstream.py), each on FFmpeg alone, and writes them into
 # OUT_DIR/fftools and OUT_DIR/protocol as patches to send apart. With --test it then makes both on one
-# tree, builds it in Docker (debian:trixie) and runs the FATE test and the protocols manual's build. It needs git, Python, the network and, for --test, Docker.
+# tree, builds it in Docker (TEST_IMAGE, its packages pinned) and runs the FATE test and the protocols manual's build. It needs git, Python, the network and, for --test, Docker.
 #
 #     upstream.sh [--test] OUT_DIR
 set -eu
@@ -45,9 +45,9 @@ done
 [ "$test" = yes ] || exit 0
 make_series all
 
-docker run --rm -v "$work":/src:ro debian:trixie bash -c '
+docker run --rm -v "$work":/src:ro -v "$here/tools":/pin:ro "$(cat "$here/TEST_IMAGE")" bash -c '
 set -e
-apt-get update -qq >/dev/null
+sh /pin/debian_snapshot.sh
 apt-get install -y -qq gcc make pkg-config texinfo >/dev/null 2>&1
 mkdir /objs && cd /objs
 /src/configure --disable-everything --enable-protocol=fdproxy --disable-autodetect --disable-asm \

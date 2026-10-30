@@ -6,7 +6,7 @@
 #
 #     fuzz/build.sh SOURCE_TREE OUT_DIR
 #
-# It runs in Docker (debian:trixie, clang); `make fuzz` builds the harness and runs it, and
+# It runs in Docker (TEST_IMAGE, Debian trixie by digest, its packages pinned; clang); `make fuzz` builds the harness and runs it, and
 # `make test-claims` the test.
 set -eu
 if [ $# -ne 2 ]; then
@@ -17,9 +17,10 @@ source=$(cd "$1" && pwd)
 mkdir -p "$2"
 out=$(cd "$2" && pwd)
 here=$(cd "$(dirname "$0")" && pwd)
-docker run --rm -v "$source":/src:ro -v "$out":/out -v "$here":/fuzz:ro -v "$here/../test":/test:ro debian:trixie bash -c '
+docker run --rm -v "$source":/src:ro -v "$out":/out -v "$here":/fuzz:ro -v "$here/../test":/test:ro \
+    -v "$here/../tools":/pin:ro "$(cat "$here/../TEST_IMAGE")" bash -c '
 set -e
-apt-get update -qq >/dev/null
+sh /pin/debian_snapshot.sh
 apt-get install -y -qq clang make pkg-config quilt >/dev/null 2>&1
 src=/src
 series=$(cat /src/debian/patches/series /src/debian/patches/*.patch | sha256sum)
